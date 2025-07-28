@@ -1,0 +1,23 @@
+[application]
+name = "Custodian"
+
+default_platform = "desktop"
+out_dir = "dist"
+asset_dir = "assets"
+
+[web.app]
+
+# HTML title tag content
+title = "{{project-name}}"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+# include `assets` in web platform
+[web.resource]
+style = ["/assets/output.css"]
+script = []
+
+[web.resource.dev]
+script = []

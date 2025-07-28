@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+#main {
+  --color1: #aaa;  
+  --color2: #333;
+  --rows:  10;
+  --cols: 10;
+  --gradient: linear-gradient(to top left, var(--color2) 25.1%, transparent 0, transparent 74.9%, var(--color2) 0);
+
+  background:
+    var(--gradient) 0 0 / calc(100% / var(--cols)) calc(100% / var(--rows)),
+    var(--gradient) calc(50% / (var(--cols) - 1)) calc(50% / (var(--rows) - 1)) / calc(100% / var(--cols)) calc(100% / var(--rows)),
+    var(--color1);
+}
