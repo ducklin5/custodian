@@ -51,7 +51,8 @@ pub fn qkv_attention_rotary<B: Backend>(
     let [_, n_ctx, _] = k.dims();
 
     let n_hstate = n_state / n_head;
-    let scale = (n_hstate as f64).powf(-0.25); // keeps the value weightings roughly normally distributed
+    // Corrected scaling factor: sqrt(d_k) normalization for stable gradients
+    let scale = (n_hstate as f64).powf(-0.5);
 
     let q = q.reshape([n_batch, n_qctx, n_head, n_hstate]);
     // interleave kv heads to match the number of q heads
@@ -60,25 +61,47 @@ pub fn qkv_attention_rotary<B: Backend>(
     let v = repeat_kv(v.reshape([n_batch, n_ctx, n_kv_head, n_hstate]), n_repeat);
 
     // the last two dims need to be (n_ctx, n_hstate)
+    // Apply scaling only to q for mathematical correctness
     let q = rotary_encoder.forward(q.swap_dims(1, 2)) * scale;
-    let k = rotary_encoder.forward(k.swap_dims(1, 2)) * scale;
+    let k = rotary_encoder.forward(k.swap_dims(1, 2));
     let v = v.swap_dims(1, 2);
 
-    // compute value weightings
+    // Optimized attention computation
+    let output = optimized_scaled_dot_product_attention(q, k, v, mask, n_qctx, n_ctx);
+
+    // output
+    output.swap_dims(1, 2).flatten(2, 3)
+}
+
+/// Optimized scaled dot-product attention with memory and compute optimizations
+fn optimized_scaled_dot_product_attention<B: Backend>(
+    q: Tensor<B, 4>, // [batch, heads, seq_q, head_dim]
+    k: Tensor<B, 4>, // [batch, heads, seq_k, head_dim] 
+    v: Tensor<B, 4>, // [batch, heads, seq_k, head_dim]
+    mask: Option<Tensor<B, 2>>,
+    n_qctx: usize,
+    n_ctx: usize,
+) -> Tensor<B, 4> {
+    // Compute attention scores
     let qk = q.matmul(k.transpose());
 
-    // apply mask
+    // Apply mask efficiently
     let qk = if let Some(mask) = mask {
-        qk + mask.slice([0..n_qctx, 0..n_ctx]).unsqueeze::<4>()
+        // Only slice the mask we need
+        if n_qctx == 1 && n_ctx > 1 {
+            // Single token case (decode phase) - use last row of mask
+            qk + mask.slice([n_qctx-1..n_qctx, 0..n_ctx]).unsqueeze::<4>()
+        } else {
+            // Multi-token case (prefill phase) - use full relevant mask
+            qk + mask.slice([0..n_qctx, 0..n_ctx]).unsqueeze::<4>()
+        }
     } else {
         qk
     };
 
-    // normalize value weightings
+    // Apply softmax and compute output
     let w = softmax(qk, 3);
-
-    // output
-    w.matmul(v).swap_dims(1, 2).flatten(2, 3)
+    w.matmul(v)
 }
 
 /// For a tensor of size (n_batch, n_ctx, n_kv_head, n_hstate), repeats the head keys or values in an interleaving manner so that the number

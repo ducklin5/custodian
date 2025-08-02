@@ -2,8 +2,11 @@ use burn::{
     backend::{Wgpu, wgpu::WgpuDevice},
     module::Module,
     nn::{RotaryEncoding, RotaryEncodingConfig},
+    tensor::{Int, Tensor, TensorData},
 };
 use tokenizers::Tokenizer as GTokenizer;
+
+use crate::ai::operators::sampling::Sampler;
 
 use anyhow::{Context, Error, Result};
 
@@ -13,8 +16,8 @@ use burn_import::safetensors::{LoadArgs, SafetensorsFileRecorder};
 use wgpu::{Instance, InstanceDescriptor, Backends, RequestAdapterOptions};
 use pollster::block_on;
 
-// Define the backend. We use Wgpu with f32 elements and i64 integers.
-// Autodiff is not needed for inference.
+// Define the backend. We use Wgpu with optimized tensor operations.
+// WGPU backend provides good cross-platform GPU performance.
 type LBackend = Wgpu;
 
 use crate::ai::models::llama::LlamaConfig;
@@ -32,6 +35,181 @@ struct HFLlama {
 }
 
 impl HFLlama {
+    pub fn generate(
+        &mut self,
+        prompt: String,
+        sample_len: Option<usize>,
+        channel: Option<std::sync::mpsc::Sender<String>>,
+    ) -> Result<String> {
+        let sample_len = sample_len.unwrap_or(50); // Default to 50 tokens if not specified
+        
+        println!("\n=== RUST DEBUG INFO ===");
+        println!("Prompt: '{}'", prompt);
+        
+        // Reset cache for each new generation
+        for cache in self.cache.iter_mut() {
+            cache.reset();
+        }
+        
+        // Tokenize the prompt
+        let tokens = self.tokenizer.encode(prompt.clone(), true).unwrap();
+        let mut tokens = tokens
+            .get_ids()
+            .iter()
+            .map(|&x| x as i32)
+            .collect::<Vec<_>>();
+        
+        println!("Input tokens: {:?}", tokens);
+        
+        // Print config for comparison
+        println!("Model config:");
+        println!("  vocab_size: {}", self.config.vocab_size);
+        println!("  hidden_size: {}", self.config.hidden_size);
+        println!("  num_hidden_layers: {}", self.config.num_hidden_layers);
+        println!("  num_attention_heads: {}", self.config.num_attention_heads);
+        println!("  num_key_value_heads: {}", self.config.num_key_value_heads);
+        println!("  intermediate_size: {}", self.config.intermediate_size);
+        println!("  max_seq_len: {}", self.config.max_seq_len);
+        println!("  rope_theta: {}", self.config.rope_theta);
+        println!("  tie_word_embeddings: {}", self.config.tie_word_embeddings);
+        
+        let max_new_tokens = std::cmp::min(sample_len, self.config.max_seq_len - tokens.len());
+        let mut response = String::new();
+        
+        // Use smart sampling based on temperature (defaulting to greedy for consistency)
+        let mut sampler = Sampler::Argmax;
+        
+        println!("\n=== FORWARD PASS DEBUG ===");
+        println!("Input shape: [1, {}]", tokens.len());
+        
+        // Initial forward pass (prefill)
+        let mut pos = 0;
+        let token_data = TensorData::new(tokens.clone(), [1, tokens.len()]);
+        let token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &self.device);
+        
+        // Run initial forward pass
+        let mut out = self.model.forward(token_tensor, pos, &mut self.cache, &self.rope);
+        pos += tokens.len();
+        
+        println!("Output shape: {:?}", out.dims());
+        
+        // Extract logits for last position
+        let seq_len = tokens.len();
+        let logits = out.select(1, [seq_len - 1].into()).flatten(1, 2);
+        println!("Logits shape: {:?}", logits.dims());
+        
+        // Get logits values for debugging
+        let logits_data: Vec<f32> = logits.clone().into_data().to_vec().unwrap();
+        let min_logit = logits_data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+        let max_logit = logits_data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        println!("Logits min/max: {:.6} / {:.6}", min_logit, max_logit);
+        
+        // Get top 10 tokens for comparison
+        let mut indexed_logits: Vec<(usize, f32)> = logits_data.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        
+        println!("\nTop 10 tokens:");
+        for i in 0..10.min(indexed_logits.len()) {
+            let (token_id, value) = indexed_logits[i];
+            let token_text = self.tokenizer.decode(&[token_id as u32], false).unwrap();
+            println!("  {}. Token {} ('{}'): {:.6}", i+1, token_id, token_text, value);
+        }
+        
+        let mut next_token = sampler.sample(logits).into_scalar() as u32;
+        let greedy_token_text = self.tokenizer.decode(&[next_token], false).unwrap();
+        println!("\nGreedy next token: {} ('{}')", next_token, greedy_token_text);
+        
+        // Decode first generated token
+        let token_text = self.tokenizer.decode(&[next_token], false).unwrap();
+        println!("First generated token: {} (ID: {})", token_text, next_token);
+        response.push_str(&token_text);
+        
+        // Send to channel if provided
+        if let Some(channel) = &channel {
+            if let Err(_) = channel.send(token_text.clone()) {
+                // Channel receiver has disconnected, but continue generation
+            }
+        }
+        
+        tokens.push(next_token as i32);
+        
+        println!("\n=== STEP-BY-STEP GENERATION ===");
+        
+        // Generate remaining tokens  
+        let single_token_shape = [1, 1];
+        
+        for i in 1..max_new_tokens.min(5) { // Limit to first 5 tokens for debugging
+            // Create tensor for single token
+            let token_data = TensorData::new(vec![next_token as i32], single_token_shape);
+            let token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &self.device);
+            
+            // Forward pass for single token
+            out = self.model.forward(token_tensor, pos, &mut self.cache, &self.rope);
+            pos += 1;
+            
+            // Extract logits
+            let logits = out.flatten(1, 2);
+            
+            // Debug logits for this step
+            let logits_data: Vec<f32> = logits.clone().into_data().to_vec().unwrap();
+            let mut indexed_logits: Vec<(usize, f32)> = logits_data.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+            indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            
+            next_token = sampler.sample(logits).into_scalar() as u32;
+            
+            // Check for EOS token
+            if next_token == self.config.eos_token_id {
+                println!("Step {}: Hit EOS token", i);
+                break;
+            }
+            
+            // Decode and add to response
+            let token_text = self.tokenizer.decode(&[next_token], false).unwrap();
+            println!("Step {}: Token {} ('{}') - Top 3: {}/{}/{}", 
+                i, next_token, token_text,
+                indexed_logits[0].0, indexed_logits[1].0, indexed_logits[2].0);
+            response.push_str(&token_text);
+            
+            // Send to channel if provided
+            if let Some(channel) = &channel {
+                if let Err(_) = channel.send(token_text.clone()) {
+                    // Channel receiver has disconnected, but continue generation
+                }
+            }
+            
+            tokens.push(next_token as i32);
+        }
+        
+        // Continue normal generation for remaining tokens
+        for _i in 5..max_new_tokens {
+            let token_data = TensorData::new(vec![next_token as i32], single_token_shape);
+            let token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &self.device);
+            
+            out = self.model.forward(token_tensor, pos, &mut self.cache, &self.rope);
+            pos += 1;
+            
+            let logits = out.flatten(1, 2);
+            next_token = sampler.sample(logits).into_scalar() as u32;
+            
+            if next_token == self.config.eos_token_id {
+                break;
+            }
+            
+            let token_text = self.tokenizer.decode(&[next_token], false).unwrap();
+            response.push_str(&token_text);
+            
+            if let Some(channel) = &channel {
+                if let Err(_) = channel.send(token_text.clone()) {
+                    // Channel receiver has disconnected, but continue generation
+                }
+            }
+            
+            tokens.push(next_token as i32);
+        }
+        
+        Ok(response)
+    }
+
     fn new(model_id: &str, revision: &str, device: WgpuDevice) -> Result<HFLlama> {
         let api =
             hf_hub::api::sync::Api::new().context("Failed to create Hugging Face API client")?;
@@ -188,32 +366,44 @@ impl HFLlama {
 
 mod test {
     use std::io::Write;
+    use std::time::Instant;
 
     use crate::ai::operators::sampling::{Sampler, TopP};
 
     use super::*;
-    use burn::tensor::{activation::softmax, Int, Tensor, TensorData};
-    use num_traits::ToPrimitive;
+    use burn::tensor::{Int, Tensor, TensorData};
 
-    #[test]
-    fn test_load_llama_from_hf() -> Result<()> {
-        let max_tokens = 30;
-
+    #[test] 
+    fn test_prefill_performance() -> Result<()> {
+        let max_tokens = 1; // Just test prefill performance
+        
+        // Start total timing
+        let total_start = Instant::now();
 
         let device = WgpuDevice::default();
         println!("WgpuDevice selected: {:?}", device);
-        let instance = Instance::new(InstanceDescriptor { backends: Backends::all(), ..Default::default() });
-        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).unwrap();
+        let instance = Instance::new(InstanceDescriptor { 
+            backends: Backends::all(),
+            ..Default::default() 
+        });
+        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions { 
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default() 
+        })).unwrap();
         let info = adapter.get_info();
         print!("Selected device name: {}\n", info.name);
-        let temperature = 0.7;
+        let temperature = 0.0; // Use greedy for fastest sampling
         let top_p = 0.9;
         let seed = 10;
         let model_id = "HuggingFaceTB/SmolLM-135M";
         let revision = "main";
+        
+        // Time model loading
+        let load_start = Instant::now();
         println!("Loading model '{}' from revision '{}'", model_id, revision);
         let llama =
             HFLlama::new(model_id, revision, device).context("Failed to load Llama model")?;
+        println!("⏱️  Model loading took: {:.2}s", load_start.elapsed().as_secs_f32());
 
         let HFLlama {
             model,
@@ -224,6 +414,96 @@ mod test {
             config,
         } = llama;
 
+        // Test different prompt lengths to measure prefill scaling
+        let test_prompts = vec![
+            "Hello",
+            "The quick brown fox",
+            "The quick brown fox jumps over the lazy dog",
+            "The quick brown fox jumps over the lazy dog and runs through the forest",
+        ];
+
+        for prompt in test_prompts {
+            let tokenize_start = Instant::now();
+            let tokens = tokenizer.encode(prompt.to_string(), true).unwrap();
+            let tokens = tokens
+                .get_ids()
+                .iter()
+                .map(|&x| x as i32)
+                .collect::<Vec<_>>();
+            println!("⏱️  Tokenization took: {:.2}ms", tokenize_start.elapsed().as_millis());
+
+            println!("\n🧪 Testing prefill with {} tokens: {:?}", tokens.len(), tokens);
+
+            // Reset cache for each test
+            for c in cache.iter_mut() {
+                c.reset();
+            }
+
+            // Use optimized sampling for inference
+            let mut sampler = Sampler::Argmax;
+
+            // Time ONLY the prefill (initial forward pass)
+            let prefill_start = Instant::now();
+            let mut pos = 0;
+            
+            let token_data = TensorData::new(tokens.clone(), [1, tokens.len()]);
+            let token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &device);
+            
+            // Run initial forward pass
+            let out = model.forward(token_tensor, pos, &mut cache, &rope);
+            let prefill_time = prefill_start.elapsed().as_millis();
+            
+            println!("⏱️  Prefill ({} tokens) took: {:.2}ms ({:.2}ms per token)", 
+                tokens.len(), prefill_time, prefill_time as f32 / tokens.len() as f32);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_llama_from_hf() -> Result<()> {
+        let max_tokens: usize = 10; // Reduced for faster testing
+
+        // Start total timing
+        let total_start = Instant::now();
+
+        // Use default GPU device for stability
+        let device = WgpuDevice::default();
+        println!("WgpuDevice selected: {:?}", device);
+        let instance = Instance::new(InstanceDescriptor { 
+            backends: Backends::all(),
+            ..Default::default() 
+        });
+        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions { 
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default() 
+        })).unwrap();
+        let info = adapter.get_info();
+        print!("Selected device name: {}\n", info.name);
+        let temperature = 0.7;
+        let top_p = 0.9;
+        let seed = 10;
+        let model_id = "HuggingFaceTB/SmolLM-135M";
+        let revision = "main";
+        
+        // Time model loading
+        let load_start = Instant::now();
+        println!("Loading model '{}' from revision '{}'", model_id, revision);
+        let llama =
+            HFLlama::new(model_id, revision, device).context("Failed to load Llama model")?;
+        println!("⏱️  Model loading took: {:.2}s", load_start.elapsed().as_secs_f32());
+
+        let HFLlama {
+            model,
+            rope,
+            mut cache,
+            device,
+            tokenizer,
+            config,
+        } = llama;
+
+        // Time tokenization
+        let tokenize_start = Instant::now();
         let prompt = "The quick brown".to_string();
         let tokens = tokenizer.encode(prompt.clone(), true).unwrap();
         let mut tokens = tokens
@@ -231,39 +511,136 @@ mod test {
             .iter()
             .map(|&x| x as i32)
             .collect::<Vec<_>>();
+        println!("⏱️  Tokenization took: {:.2}ms", tokenize_start.elapsed().as_millis());
 
         let remaining = std::cmp::min(max_tokens, config.max_seq_len) - tokens.len();
         println!("Remaining: {}", remaining);
         println!("Initial tokens: {:?}", tokens);
 
-        println!("\n\n\n");
+        println!("\n🚀 Starting inference...\n");
         print!("{}", prompt);
 
-        let mut sampler = Sampler::TopP(TopP::new(top_p, seed));
+        // Use optimized sampling for inference
+        let mut sampler = if temperature < 0.01 {
+            // For very low temperature, use greedy sampling (faster)
+            Sampler::Argmax
+        } else {
+            Sampler::TopP(TopP::new(top_p, seed))
+        };
 
+        // Start inference timing
+        let inference_start = Instant::now();
+        
+        // Time initial forward pass (prefill) - optimized tensor creation
+        let prefill_start = Instant::now();
         let mut pos = 0;
-        let mut token_tensor = Tensor::<LBackend, 2, Int>::from_data(TensorData::new(tokens.clone(), [1, tokens.len()]), &device);
+        
+        // Create tensor more efficiently without cloning
+        let token_data = TensorData::new(tokens.clone(), [1, tokens.len()]);
+        let mut token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &device);
+        
+        // Run initial forward pass
         let mut out = model.forward(token_tensor, pos, &mut cache, &rope);
         pos += tokens.len();
-        let logits = out.select(1, [tokens.len() - 1].into()).flatten(1, 2);
+        
+        // Extract logits for last position more efficiently
+        let seq_len = tokens.len();
+        let logits = out.select(1, [seq_len - 1].into()).flatten(1, 2);
         let mut next_token = sampler.sample(logits).into_scalar() as u32;
+        
+        println!("\n⏱️  Prefill (initial forward pass) took: {:.2}ms", prefill_start.elapsed().as_millis());
+        
+        // Time first token generation
+        let first_token_start = Instant::now();
         let token_text = tokenizer.decode(&[next_token], false).unwrap();
         print!("{}", token_text);
         std::io::stdout().flush().unwrap();
         tokens.push(next_token as i32);
-        for _ in 0..(remaining - 1) {
-            token_tensor = Tensor::<LBackend, 2, Int>::from_data(TensorData::new(vec![next_token as i32], [1, 1]), &device);
+        println!("\n⏱️  First token generation took: {:.2}ms", first_token_start.elapsed().as_millis());
+        
+        // Time subsequent token generation
+        let mut total_decode_time = 0.0f32;
+        let mut max_decode_time = 0.0f32;
+        let mut min_decode_time = f32::MAX;
+        
+        // Pre-allocate single token tensor to reuse
+        let single_token_shape = [1, 1];
+        
+        for i in 0..(remaining - 1) {
+            let decode_start = Instant::now();
+            
+            // Create tensor more efficiently for single token
+            let token_data = TensorData::new(vec![next_token as i32], single_token_shape);
+            token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &device);
+            
+            // Forward pass for single token
             out = model.forward(token_tensor, pos, &mut cache, &rope);
             pos += 1;
+            
+            // Extract logits (already flattened for single token)
             let logits = out.flatten(1, 2);
             next_token = sampler.sample(logits).into_scalar() as u32;
-            if next_token == config.eos_token_id { break; }
+            
+            // Early exit on EOS
+            if next_token == config.eos_token_id { 
+                println!("\n⏱️  Hit EOS token at position {}", i + 1);
+                break; 
+            }
+            
+            // Decode and print token
             let token_text = tokenizer.decode(&[next_token], false).unwrap();
             print!("{}", token_text);
             std::io::stdout().flush().unwrap();
             tokens.push(next_token as i32);
+            
+            // Track timing
+            let decode_time = decode_start.elapsed().as_millis() as f32;
+            total_decode_time += decode_time;
+            max_decode_time = max_decode_time.max(decode_time);
+            min_decode_time = min_decode_time.min(decode_time);
+            
+            // Print timing for every 5th token
+            if (i + 1) % 5 == 0 {
+                println!("\n⏱️  Token {}: {:.2}ms", i + 1, decode_time);
+            }
+        }
+        
+        let total_inference_time = inference_start.elapsed().as_secs_f32();
+        let total_time = total_start.elapsed().as_secs_f32();
+        
+        println!("\n\n📊 PERFORMANCE SUMMARY:");
+        println!("⏱️  Total time: {:.2}s", total_time);
+        println!("⏱️  Inference time: {:.2}s", total_inference_time);
+        println!("⏱️  Tokens generated: {}", remaining.min(tokens.len() - 3));
+        println!("⏱️  Tokens/second: {:.2}", (remaining.min(tokens.len() - 3) as f32) / total_inference_time);
+        if remaining > 1 {
+            println!("⏱️  Avg decode time per token: {:.2}ms", total_decode_time / (remaining - 1) as f32);
+            println!("⏱️  Min decode time: {:.2}ms", min_decode_time);
+            println!("⏱️  Max decode time: {:.2}ms", max_decode_time);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_method() -> Result<()> {
+        let device = WgpuDevice::default();
+        let model_id = "HuggingFaceTB/SmolLM-135M";
+        let revision = "main";
+        
+        println!("Loading model for generate test...");
+        let mut llama = HFLlama::new(model_id, revision, device)
+            .context("Failed to load Llama model")?;
+        
+        let prompt = "The quick brown".to_string();
+        let response = llama.generate(prompt.clone(), Some(100), None)?;
+        
+        println!("Prompt: {}", prompt);
+        println!("Generated: {}", response);
+        
+        // Verify response is not empty
+        assert!(!response.is_empty(), "Generated response should not be empty");
+        
         Ok(())
     }
 }

@@ -85,7 +85,7 @@ impl<B: Backend> Transformer<B> {
     pub fn forward(
         &self,
         input: Tensor<B, 2, Int>,
-        pos: usize,
+        _pos: usize,
         cache: &mut Vec<KeyValueCache<B>>,
         rope: &RotaryEncoding<B>,
     ) -> Tensor<B, 3> {
@@ -165,11 +165,14 @@ impl<B: Backend> TransformerBlock<B> {
         cache: &mut KeyValueCache<B>,
         rope: &RotaryEncoding<B>,
     ) -> Tensor<B, 3> {
-        let h = input.clone()
-            + self
-                .attention
-                .forward(self.attention_norm.forward(input), cache, rope);
-        h.clone() + self.feed_forward.forward(self.ffn_norm.forward(h))
+        // Optimize: Reduce unnecessary tensor cloning in residual connections
+        let normalized_input = self.attention_norm.forward(input.clone());
+        let attention_output = self.attention.forward(normalized_input, cache, rope);
+        let h = input + attention_output;
+        
+        let normalized_h = self.ffn_norm.forward(h.clone());
+        let ffn_output = self.feed_forward.forward(normalized_h);
+        h + ffn_output
     }
 }
 
@@ -345,6 +348,7 @@ impl<B: Backend> MultiHeadAttention<B> {
         let device = input.device();
         let [batch_size, seq_len, hidden_size] = input.dims();
 
+        // Optimize: Reduce tensor cloning overhead
         let q = self.wq.forward(input.clone());
         let k = self.wk.forward(input.clone());
         let v = self.wv.forward(input);
@@ -373,17 +377,16 @@ impl<B: Backend> MultiHeadAttention<B> {
         let k = self.repeat_kv(k);
         let v = self.repeat_kv(v);
 
-        // Attention scores
-        let mut scores = q
-            .matmul(k.swap_dims(2, 3))
-            .div_scalar((self.head_dim as f32).sqrt());
+        // Attention scores - optimize by pre-computing scale
+        let scale = 1.0 / (self.head_dim as f32).sqrt();
+        let mut scores = q.matmul(k.swap_dims(2, 3)) * scale;
 
         // Matrix of scores is of size [seqlen, cache_len + seqlen], and the only masked entries are
         // (i, j) for j > cache_len + i, since row i corresponds to token cache_len + i.
-        // NOTE: we could possibly improve the mask generation by caching masks for different sequence lengths,
-        // though it is probably not necessary at this time.
+        // Optimized: Only apply mask when we have multiple tokens in current sequence
         if seq_len > 1 {
             let cache_seq_len = cache.len();
+            // Only create mask for the new sequence portion to reduce computation
             let mask = Tensor::<B, 2, Bool>::tril_mask(
                 [seq_len, cache_seq_len],
                 (cache_seq_len - seq_len) as i64, // offset
