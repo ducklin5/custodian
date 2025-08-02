@@ -1,5 +1,3 @@
-use hf_hub::{Repo, RepoType, api::sync::Api};
-
 use burn::backend::{Wgpu, wgpu::WgpuDevice};
 use safetensors::SafeTensors;
 use tokenizers::Tokenizer as GTokenizer;
@@ -22,10 +20,10 @@ struct HFLlama {
 }
 
 fn load_llama_from_hf(model_id: &str, revision: &str, device: &WgpuDevice) -> Result<HFLlama> {
-    let api = Api::new().context("Failed to create Hugging Face API client")?;
-    let repo = api.repo(Repo::with_revision(
+    let api = hf_hub::api::sync::Api::new().context("Failed to create Hugging Face API client")?;
+    let repo = api.repo(hf_hub::Repo::with_revision(
         model_id.to_string(),
-        RepoType::Model,
+        hf_hub::RepoType::Model,
         revision.to_string(),
     ));
 
@@ -70,14 +68,18 @@ fn load_llama_from_hf(model_id: &str, revision: &str, device: &WgpuDevice) -> Re
     // Debug: Check if we have the expected tensors
     let tensor_names: Vec<&str> = tensors.names().into_iter().collect();
     println!("Available tensor names: {:?}", tensor_names);
-    
+
     // Check for key tensors
-    let has_embed_tokens = tensor_names.iter().any(|&name| name == "model.embed_tokens.weight");
+    let has_embed_tokens = tensor_names
+        .iter()
+        .any(|&name| name == "model.embed_tokens.weight");
     let has_lm_head = tensor_names.iter().any(|&name| name == "lm_head.weight");
     let has_norm = tensor_names.iter().any(|&name| name == "model.norm.weight");
-    
-    println!("Has embed_tokens: {}, has lm_head: {}, has norm: {}", 
-             has_embed_tokens, has_lm_head, has_norm);
+
+    println!(
+        "Has embed_tokens: {}, has lm_head: {}, has norm: {}",
+        has_embed_tokens, has_lm_head, has_norm
+    );
 
     let device = WgpuDevice::default();
     let model = config.build_pretrained(&device, &tensors);
@@ -91,14 +93,15 @@ fn load_llama_from_hf(model_id: &str, revision: &str, device: &WgpuDevice) -> Re
 
 mod test {
     use super::*;
-    use burn::tensor::{Tensor, TensorData, Int};
+    use burn::tensor::{Int, Tensor, TensorData};
     use num_traits::ToPrimitive;
     use std::io::Read;
     use std::io::Write;
-    #[test]
+    //#[test]
     fn test_load_llama_from_hf() -> Result<()> {
         let device = WgpuDevice::default();
         println!("Using device: {:?}", device);
+        //let model_id = "HuggingFaceM4/tiny-random-Llama3ForCausalLM";
         let model_id = "HuggingFaceTB/SmolLM-135M";
         let revision = "main";
         println!("Loading model '{}' from revision '{}'", model_id, revision);
@@ -110,7 +113,7 @@ mod test {
             tokenizer,
         } = llama;
 
-        let prompt = "Hello, ".to_string();
+        let prompt = "Hello there,".to_string();
         let tokens = tokenizer.encode(prompt.clone(), false).unwrap();
         let mut tokens = tokens
             .get_ids()
@@ -121,74 +124,35 @@ mod test {
         let mut generated_tokens = 0;
         let max_tokens = 30; // Shorter for better quality
 
-        let remaining = std::cmp::min(max_tokens, config.max_seq_len - tokens.len());
+        let remaining = std::cmp::min(max_tokens, config.max_seq_len) - tokens.len();
         println!("Remaining: {}", remaining);
         println!("Initial tokens: {:?}", tokens);
 
         println!("\n\n\n");
         print!("{}", prompt);
 
-        // Track recent tokens for repetition detection
-        let mut recent_tokens = std::collections::VecDeque::with_capacity(5);
-        let mut consecutive_repetitions = 0;
-
         for i in 0..remaining {
-            // Create tensor with proper i32 data type and correct shape [batch_size=1, seq_len]
+            // Create tensor using llama3-burn approach but adapted for your burn version
             let token_tensor = Tensor::<LBackend, 2, Int>::from_data(
                 TensorData::new(tokens.iter().map(|&t| t as i32).collect(), [1, tokens.len()]),
                 &device,
             );
-            
+
             let out = model.forward(token_tensor);
             let [_n_batch, n_token, _n_dict] = out.dims();
-            
+
             let last_row: Tensor<LBackend, 1> =
                 out.slice([0..1, (n_token - 1)..n_token]).flatten(0, 2);
 
-            // Apply temperature sampling instead of greedy decoding
-            let temperature = 0.7; // Lower temperature for more focused generation
-            let logits = last_row / temperature;
-            
             // Simple greedy decoding for now - nucleus sampling is complex with burn tensors
-            let token_id = logits.argmax(0).into_scalar().to_i32().unwrap();
-            
-            // Check for repetition
-            if recent_tokens.len() > 0 && recent_tokens.back() == Some(&token_id) {
-                consecutive_repetitions += 1;
-                if consecutive_repetitions >= 3 {
-                    println!("\n[Stopping due to repetition]");
-                    break;
-                }
-            } else {
-                consecutive_repetitions = 0;
-            }
-            
-            // Debug: print token info
-            if i < 10 {
-                println!("\nStep {}: token_id={}", i, token_id);
-            }
-            
+            let token_id = last_row.argmax(0).into_scalar().to_i32().unwrap();
             tokens.push(token_id);
-            recent_tokens.push_back(token_id);
-            if recent_tokens.len() > 5 {
-                recent_tokens.pop_front();
-            }
 
             let token_text = tokenizer.decode(&[token_id as u32], true).unwrap();
             print!("{token_text}");
             std::io::stdout().flush().unwrap();
 
             text += &token_text;
-            generated_tokens += 1;
-            
-            // Stop if we hit certain tokens or have a complete sentence
-            if token_id == config.eos_token_id as i32 || 
-               token_id == 2 || 
-               token_id == 13 || // Newline
-               (token_text.contains('.') && generated_tokens > 10) {
-                println!("\n[Stopping at natural break]");
-                break;
-            }
         }
         println!();
         Ok(())

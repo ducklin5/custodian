@@ -6,3 +6,5 @@ pub mod rsqrt;
 pub use apply::Apply;
 pub use outer::OuterProduct;
 pub use rsqrt::Rsqrt;
+
+pub mod sampling;

@@ -19,7 +19,7 @@ where
 //#[test]
 fn test_rsqrt() {
     use burn::backend::wgpu::{Wgpu, WgpuDevice};
-    let device = WgpuDevice::BestAvailable;
+    let device = WgpuDevice::default();
     let a = Tensor::<Wgpu, 1>::from_data([1., 2., 3., 4.], &device);
     let result = a.rsqrt();
     let expected = Tensor::ones([4], &device) / a.sqrt();

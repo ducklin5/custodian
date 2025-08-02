@@ -59,6 +59,7 @@ pub struct LlamaConfig {
     pub name_or_path: Option<String>,
     pub architectures: Vec<String>,
     pub attention_bias: bool,
+    #[serde(default)]
     pub attention_dropout: f64,
     pub bos_token_id: u32,
     pub eos_token_id: u32,
@@ -70,6 +71,7 @@ pub struct LlamaConfig {
     pub intermediate_size: usize,
     #[serde(rename = "max_position_embeddings")]
     pub max_seq_len: usize,
+    #[serde(default)]
     pub mlp_bias: bool,
     pub model_type: String,
     pub num_attention_heads: usize,
