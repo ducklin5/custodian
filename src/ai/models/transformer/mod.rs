@@ -33,6 +33,7 @@ pub struct TransformerConfig {
     /// RMSNorm epsilon.
     #[config(default = "1e-5")]
     pub norm_eps: f64,
+    pub tie_word_embeddings: bool,
 }
 
 impl TransformerConfig {
@@ -56,10 +57,16 @@ impl TransformerConfig {
             .with_epsilon(self.norm_eps)
             .init(device);
 
+        let output = if self.tie_word_embeddings {
+            None
+        } else {
+            Some(LinearConfig::new(self.d_model, self.vocab_size).with_bias(false).init(device))
+        };
         Transformer {
             tok_embeddings,
             layers,
             norm,
+            output,
         }
     }
 }
@@ -70,6 +77,7 @@ pub struct Transformer<B: Backend> {
     tok_embeddings: Embedding<B>,
     layers: Vec<TransformerBlock<B>>,
     norm: RmsNorm<B>,
+    output: Option<Linear<B>>,
     // NOTE: Starting with Llama 3.2, the weights of the output layer are tied with the embedding
 }
 
@@ -77,6 +85,7 @@ impl<B: Backend> Transformer<B> {
     pub fn forward(
         &self,
         input: Tensor<B, 2, Int>,
+        pos: usize,
         cache: &mut Vec<KeyValueCache<B>>,
         rope: &RotaryEncoding<B>,
     ) -> Tensor<B, 3> {
@@ -87,13 +96,13 @@ impl<B: Backend> Transformer<B> {
         }
 
         let h = self.norm.forward(h);
-        
-        // Weight tying: use the token embeddings weights for the output layer
-        // The embedding weights are [vocab_size, d_model], so we transpose them to [d_model, vocab_size]
-        // and then perform the matrix multiplication: h @ tok_embeddings.weight.T
-        let embedding_weights = self.tok_embeddings.weight.val();
-        let output_weights = embedding_weights.transpose().unsqueeze();
-        h.matmul(output_weights)
+        if let Some(output) = &self.output {
+            output.forward(h)
+        } else {
+            let embedding_weights = self.tok_embeddings.weight.val();
+            let output_weights = embedding_weights.transpose().unsqueeze::<3>();
+            h.matmul(output_weights)
+        }
     }
 }
 

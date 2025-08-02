@@ -18,6 +18,7 @@ use crate::ai::models::llama::LlamaConfig;
 
 use super::models::transformer::{KeyValueCache, Transformer};
 
+
 struct HFLlama {
     config: LlamaConfig,
     tokenizer: GTokenizer,
@@ -77,8 +78,6 @@ impl HFLlama {
             .with_key_remap("model\\.(.+)", "$1")
             // Map embed_tokens.* -> tok_embeddings.*
             .with_key_remap("embed_tokens\\.(.+)", "tok_embeddings.$1")
-            // Map embed_tokens.* -> output.*
-            //.with_key_remap("embed_tokens\\.(.+)", "output.$1")
             // Map layers.[i].input_layernorm.* -> layers.[i].attention_norm.*
             .with_key_remap(
                 "(layers\\.[0-9]+)\\.input_layernorm\\.(.+)",
@@ -126,6 +125,11 @@ impl HFLlama {
             )
             // Map norm.weight -> norm.gamma for all layers
             .with_key_remap("(.*)norm\\.weight", "${1}norm.gamma");
+        let load_args = if !config.tie_word_embeddings {
+            load_args.with_key_remap("lm_head\\.weight", "output.weight")
+        } else {
+            load_args
+        };
 
         let record = SafetensorsFileRecorder::<FullPrecisionSettings>::default()
             .load(load_args, &device)
@@ -141,6 +145,7 @@ impl HFLlama {
             n_kv_heads: config.num_key_value_heads,
             max_seq_len: config.max_seq_len,
             norm_eps: 1e-5,
+            tie_word_embeddings: config.tie_word_embeddings,
         };
 
         let model = transformer_config
@@ -160,7 +165,7 @@ impl HFLlama {
             .collect::<Vec<_>>();
 
         let rope = RotaryEncodingConfig::new(
-            config.max_seq_len * 2,
+            config.max_seq_len,
             config.hidden_size / config.num_attention_heads,
         )
         .with_theta(config.rope_theta as f32);
@@ -199,10 +204,10 @@ mod test {
 
         let device = WgpuDevice::default();
         println!("Using device: {:?}", device);
-        let temperature = -1.0;
+        let temperature = 0.7;
         let top_p = 0.9;
-        let seed = 0;
-        let model_id = "amd/AMD-Llama-135m";
+        let seed = 10;
+        let model_id = "HuggingFaceTB/SmolLM-135M";
         let revision = "main";
         println!("Loading model '{}' from revision '{}'", model_id, revision);
         let llama =
@@ -218,7 +223,7 @@ mod test {
         } = llama;
 
         let prompt = "The quick brown".to_string();
-        let tokens = tokenizer.encode(prompt.clone(), false).unwrap();
+        let tokens = tokenizer.encode(prompt.clone(), true).unwrap();
         let mut tokens = tokens
             .get_ids()
             .iter()
@@ -232,33 +237,29 @@ mod test {
         println!("\n\n\n");
         print!("{}", prompt);
 
-        let mut sampler = Sampler::Argmax;
+        let mut sampler = Sampler::TopP(TopP::new(top_p, seed));
 
-        for i in 0..remaining {
-
-            // Create tensor using the working pattern from text_gen_b.rs
-            let token_tensor = Tensor::<LBackend, 2, Int>::from_data(
-                TensorData::new(
-                    tokens.clone(),
-                    [1, tokens.len()],
-                ),
-                &device,
-            );
-
-            let out = model.forward(token_tensor, &mut cache, &rope);
-            let [_n_batch, n_token, _n_dict] = out.dims();
-
-            let mut next_token_logits: Tensor<LBackend, 1> = out.slice([0..1, (n_token - 1)..n_token]).flatten(0, 2);
-
-            // Simple greedy decoding
-            let token_id = sampler.sample(next_token_logits.unsqueeze()).into_scalar().to_u32().unwrap();
-
-            let token_text = tokenizer.decode(&[token_id], true).unwrap();
+        let mut pos = 0;
+        let mut token_tensor = Tensor::<LBackend, 2, Int>::from_data(TensorData::new(tokens.clone(), [1, tokens.len()]), &device);
+        let mut out = model.forward(token_tensor, pos, &mut cache, &rope);
+        pos += tokens.len();
+        let logits = out.select(1, [tokens.len() - 1].into()).flatten(1, 2);
+        let mut next_token = sampler.sample(logits).into_scalar() as u32;
+        let token_text = tokenizer.decode(&[next_token], false).unwrap();
+        print!("{}", token_text);
+        std::io::stdout().flush().unwrap();
+        tokens.push(next_token as i32);
+        for _ in 0..(remaining - 1) {
+            token_tensor = Tensor::<LBackend, 2, Int>::from_data(TensorData::new(vec![next_token as i32], [1, 1]), &device);
+            out = model.forward(token_tensor, pos, &mut cache, &rope);
+            pos += 1;
+            let logits = out.flatten(1, 2);
+            next_token = sampler.sample(logits).into_scalar() as u32;
+            if next_token == config.eos_token_id { break; }
+            let token_text = tokenizer.decode(&[next_token], false).unwrap();
             print!("{}", token_text);
             std::io::stdout().flush().unwrap();
-
-            tokens.push(token_id.try_into().unwrap());
-
+            tokens.push(next_token as i32);
         }
 
         Ok(())
