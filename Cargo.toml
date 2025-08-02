@@ -36,6 +36,8 @@ memmap2 = "0.9.7"
 burn-import = "0.18.0"
 burn-ndarray = "0.18.0"
 burn-wgpu = "0.18.0"
+wgpu = "0.19"
+pollster = "0.4.0"
 
 [profile]
 

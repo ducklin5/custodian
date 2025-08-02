@@ -10,6 +10,9 @@ use anyhow::{Context, Error, Result};
 use burn::record::{FullPrecisionSettings, Recorder};
 use burn_import::safetensors::{LoadArgs, SafetensorsFileRecorder};
 
+use wgpu::{Instance, InstanceDescriptor, Backends, RequestAdapterOptions};
+use pollster::block_on;
+
 // Define the backend. We use Wgpu with f32 elements and i64 integers.
 // Autodiff is not needed for inference.
 type LBackend = Wgpu;
@@ -197,13 +200,12 @@ mod test {
         let max_tokens = 30;
 
 
-        //let instance = wgpu::Instance::default();
-        //let adapters = instance.enumerate_adapters(wgpu::Backends::all());
-        //let adapter_info = adapters.iter().map(|adapter| adapter.get_info()).collect::<Vec<_>>();
-        //println!("Adapters: {:?}", adapters);
-
         let device = WgpuDevice::default();
-        println!("Using device: {:?}", device);
+        println!("WgpuDevice selected: {:?}", device);
+        let instance = Instance::new(InstanceDescriptor { backends: Backends::all(), ..Default::default() });
+        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).unwrap();
+        let info = adapter.get_info();
+        print!("Selected device name: {}\n", info.name);
         let temperature = 0.7;
         let top_p = 0.9;
         let seed = 10;
