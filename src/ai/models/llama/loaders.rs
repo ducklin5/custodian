@@ -1,14 +1,13 @@
 use burn::{
     module::Param,
-    nn::{self, Embedding},
+    nn::{self},
     tensor::backend::Backend,
 };
-use super::{LlamaConfig, Llama};
+use super::LlamaConfig;
 use crate::ai::loaders::WgpuFloatTensorReader;
 use crate::ai::models::parts::{Mlp, MultiHeadSelfAttention, ResidualDecoderAttentionBlock, RmsNorm};
 use safetensors::SafeTensors;
 
-use super::parts::*;
 
 pub fn load_mlp<B: Backend>(
     safetensors: &SafeTensors,

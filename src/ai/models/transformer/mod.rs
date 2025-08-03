@@ -4,13 +4,36 @@ use burn::{
     config::Config,
     module::Module,
     nn::{
-        Embedding, EmbeddingConfig, Linear, LinearConfig, RmsNorm, RmsNormConfig, RotaryEncoding,
+        Embedding, EmbeddingConfig, Linear, LinearConfig, RmsNorm, RmsNormConfig,
         SwiGlu, SwiGluConfig,
     },
     tensor::{activation::softmax, backend::Backend, Bool, Device, Int, Tensor},
 };
 
+use super::custom_rope::{CustomRotaryEncoding, CustomRotaryEncodingConfig};
+
 use cache::AutoregressiveCache;
+use md5;
+
+// Helper function to compute tensor hash for debugging - concatenate all elements as strings and MD5 hash
+fn tensor_hash<B: Backend, const D: usize>(tensor: &Tensor<B, D>) -> u64 {
+    let data: Vec<f32> = tensor.clone().into_data().to_vec().unwrap();
+    
+    // Round each element to 3 decimal places and concatenate to string
+    let tensor_string: String = data.iter()
+        .map(|&val| format!("{:.3}", val))
+        .collect::<Vec<String>>()
+        .join("");
+    
+    // MD5 hash the concatenated string
+    let hash_bytes = md5::compute(tensor_string.as_bytes());
+    
+    // Convert first 8 bytes to u64 for display (little-endian to match Python)
+    u64::from_le_bytes([
+        hash_bytes[0], hash_bytes[1], hash_bytes[2], hash_bytes[3],
+        hash_bytes[4], hash_bytes[5], hash_bytes[6], hash_bytes[7],
+    ])
+}
 
 /// Configuration to create a Llama [decoder-only transformer](Transformer).
 #[derive(Config)]
@@ -87,22 +110,81 @@ impl<B: Backend> Transformer<B> {
         input: Tensor<B, 2, Int>,
         _pos: usize,
         cache: &mut Vec<KeyValueCache<B>>,
-        rope: &RotaryEncoding<B>,
+        rope: &CustomRotaryEncoding<B>,
     ) -> Tensor<B, 3> {
-        let mut h = self.tok_embeddings.forward(input);
+        self.forward_with_debug(input, _pos, cache, rope, true)
+    }
 
-        for (layer, c) in self.layers.iter().zip(cache.into_iter()) {
+    pub fn forward_with_debug(
+        &self,
+        input: Tensor<B, 2, Int>,
+        _pos: usize,
+        cache: &mut Vec<KeyValueCache<B>>,
+        rope: &CustomRotaryEncoding<B>,
+        debug: bool,
+    ) -> Tensor<B, 3> {
+        if debug {
+            println!("=== TRANSFORMER DEBUG ===");
+        }
+        
+        let mut h = self.tok_embeddings.forward(input);
+        if debug {
+            println!("After embeddings: hash={:016x}, shape={:?}", tensor_hash(&h), h.dims());
+        }
+
+        for (i, (layer, c)) in self.layers.iter().zip(cache.into_iter()).enumerate() {
+            let h_before = h.clone();
+            h = layer.forward_with_debug(h, c, rope, debug);
+            if debug {
+                println!("After layer {}: hash={:016x}, shape={:?}", i, tensor_hash(&h), h.dims());
+                
+                // Check if layer output is very different from input
+                let h_diff = h.clone() - h_before;
+                println!("  Layer {} diff hash: {:016x}", i, tensor_hash(&h_diff));
+            }
+            
+            // Only print first few layers to avoid spam
+            if debug && i >= 2 {
+                break;
+            }
+        }
+        
+        // Continue without debug for remaining layers
+        let skip_count = if debug { 3 } else { 0 };
+        for (layer, c) in self.layers.iter().skip(skip_count).zip(cache.into_iter().skip(skip_count)) {
             h = layer.forward(h, c, rope);
         }
 
         let h = self.norm.forward(h);
-        if let Some(output) = &self.output {
-            output.forward(h)
+        if debug {
+            println!("After final norm: hash={:016x}, shape={:?}", tensor_hash(&h), h.dims());
+        }
+        
+        let final_output = if let Some(output) = &self.output {
+            let result = output.forward(h);
+            if debug {
+                println!("After output projection: hash={:016x}, shape={:?}", tensor_hash(&result), result.dims());
+            }
+            result
         } else {
             let embedding_weights = self.tok_embeddings.weight.val();
+            if debug {
+                println!("Embedding weights: hash={:016x}, shape={:?}", tensor_hash(&embedding_weights), embedding_weights.dims());
+            }
+            
             let output_weights = embedding_weights.transpose().unsqueeze::<3>();
-            h.matmul(output_weights)
-        }
+            if debug {
+                println!("Output weights (transposed): hash={:016x}, shape={:?}", tensor_hash(&output_weights), output_weights.dims());
+            }
+            
+            let result = h.matmul(output_weights);
+            if debug {
+                println!("After tied embedding matmul: hash={:016x}, shape={:?}", tensor_hash(&result), result.dims());
+            }
+            result
+        };
+        
+        final_output
     }
 }
 
@@ -163,16 +245,54 @@ impl<B: Backend> TransformerBlock<B> {
         &self,
         input: Tensor<B, 3>,
         cache: &mut KeyValueCache<B>,
-        rope: &RotaryEncoding<B>,
+        rope: &CustomRotaryEncoding<B>,
     ) -> Tensor<B, 3> {
+        self.forward_with_debug(input, cache, rope, true)
+    }
+
+    pub fn forward_with_debug(
+        &self,
+        input: Tensor<B, 3>,
+        cache: &mut KeyValueCache<B>,
+        rope: &CustomRotaryEncoding<B>,
+        debug: bool,
+    ) -> Tensor<B, 3> {
+        if debug {
+            println!("    Block input: hash={:016x}", tensor_hash(&input));
+        }
+        
         // Optimize: Reduce unnecessary tensor cloning in residual connections
         let normalized_input = self.attention_norm.forward(input.clone());
-        let attention_output = self.attention.forward(normalized_input, cache, rope);
+        if debug {
+            println!("    After attn norm: hash={:016x}", tensor_hash(&normalized_input));
+        }
+        
+        let attention_output = self.attention.forward_with_debug(normalized_input, cache, rope, debug);
+        if debug {
+            println!("    After attention: hash={:016x}", tensor_hash(&attention_output));
+        }
+        
         let h = input + attention_output;
+        if debug {
+            println!("    After attn residual: hash={:016x}", tensor_hash(&h));
+        }
         
         let normalized_h = self.ffn_norm.forward(h.clone());
-        let ffn_output = self.feed_forward.forward(normalized_h);
-        h + ffn_output
+        if debug {
+            println!("    After ffn norm: hash={:016x}", tensor_hash(&normalized_h));
+        }
+        
+        let ffn_output = self.feed_forward.forward_with_debug(normalized_h, debug);
+        if debug {
+            println!("    After ffn: hash={:016x}", tensor_hash(&ffn_output));
+        }
+        
+        let final_output = h + ffn_output;
+        if debug {
+            println!("    After ffn residual: hash={:016x}", tensor_hash(&final_output));
+        }
+        
+        final_output
     }
 }
 
@@ -216,7 +336,25 @@ impl<B: Backend> FeedForward<B> {
     /// - input: `[batch_size, seq_length, d_model]`
     /// - output: `[batch_size, seq_length, d_model]`
     pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
-        self.w2.forward(self.swiglu.forward(input))
+        self.forward_with_debug(input, true)
+    }
+
+    pub fn forward_with_debug(&self, input: Tensor<B, 3>, debug: bool) -> Tensor<B, 3> {
+        if debug {
+            println!("      FFN input: hash={:016x}", tensor_hash(&input));
+        }
+        
+        let swiglu_output = self.swiglu.forward(input);
+        if debug {
+            println!("      After SwiGLU: hash={:016x}", tensor_hash(&swiglu_output));
+        }
+        
+        let final_output = self.w2.forward(swiglu_output);
+        if debug {
+            println!("      After w2: hash={:016x}", tensor_hash(&final_output));
+        }
+        
+        final_output
     }
 }
 
@@ -343,8 +481,22 @@ impl<B: Backend> MultiHeadAttention<B> {
         &self,
         input: Tensor<B, 3>,
         cache: &mut KeyValueCache<B>,
-        rope: &RotaryEncoding<B>,
+        rope: &CustomRotaryEncoding<B>,
     ) -> Tensor<B, 3> {
+        self.forward_with_debug(input, cache, rope, true)
+    }
+
+    pub fn forward_with_debug(
+        &self,
+        input: Tensor<B, 3>,
+        cache: &mut KeyValueCache<B>,
+        rope: &CustomRotaryEncoding<B>,
+        debug: bool,
+    ) -> Tensor<B, 3> {
+        if debug {
+            println!("      Attn input: hash={:016x}", tensor_hash(&input));
+        }
+        
         let device = input.device();
         let [batch_size, seq_len, hidden_size] = input.dims();
 
@@ -352,6 +504,12 @@ impl<B: Backend> MultiHeadAttention<B> {
         let q = self.wq.forward(input.clone());
         let k = self.wk.forward(input.clone());
         let v = self.wv.forward(input);
+
+        if debug {
+            println!("      After Q proj: hash={:016x}", tensor_hash(&q));
+            println!("      After K proj: hash={:016x}", tensor_hash(&k)); 
+            println!("      After V proj: hash={:016x}", tensor_hash(&v));
+        }
 
         // [batch_size, num_heads, seq_len, head_dim]
         let q = q
@@ -364,45 +522,85 @@ impl<B: Backend> MultiHeadAttention<B> {
             .reshape([batch_size, seq_len, self.n_kv_heads, self.head_dim])
             .swap_dims(1, 2);
 
-        // Sequence start position can be deduced from the number of cached items
-        let cache_seq_len = cache.len();
+        if debug {
+            println!("      After reshape/transpose Q: hash={:016x}", tensor_hash(&q));
+            println!("      After reshape/transpose K: hash={:016x}", tensor_hash(&k));
+            println!("      After reshape/transpose V: hash={:016x}", tensor_hash(&v));
+        }
 
-        let q = rope.apply(q, cache_seq_len);
-        let k = rope.apply(k, cache_seq_len);
+        // Apply RoPE correctly - start position should be the cache length (where new tokens begin)
+        let start_position = cache.len();
+
+        let (q, k) = rope.apply_rope(q, k, start_position);
+
+        if debug {
+            println!("      After RoPE Q: hash={:016x}", tensor_hash(&q));
+            println!("      After RoPE K: hash={:016x}", tensor_hash(&k));
+        }
 
         // Key-value caching
         let (k, v) = cache.forward(k, v);
+
+        if debug {
+            println!("      After KV cache: K hash={:016x}, V hash={:016x}", tensor_hash(&k), tensor_hash(&v));
+        }
 
         // Repeat key/value heads if num_kv_heads < num_heads
         let k = self.repeat_kv(k);
         let v = self.repeat_kv(v);
 
+        if debug {
+            println!("      After repeat_kv: K hash={:016x}, V hash={:016x}", tensor_hash(&k), tensor_hash(&v));
+        }
+
         // Attention scores - optimize by pre-computing scale
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         let mut scores = q.matmul(k.swap_dims(2, 3)) * scale;
 
-        // Matrix of scores is of size [seqlen, cache_len + seqlen], and the only masked entries are
-        // (i, j) for j > cache_len + i, since row i corresponds to token cache_len + i.
-        // Optimized: Only apply mask when we have multiple tokens in current sequence
+        if debug {
+            println!("      After attention scores: hash={:016x}", tensor_hash(&scores));
+        }
+
+        // Apply causal masking - revert to original working approach for now
         if seq_len > 1 {
             let cache_seq_len = cache.len();
-            // Only create mask for the new sequence portion to reduce computation
             let mask = Tensor::<B, 2, Bool>::tril_mask(
                 [seq_len, cache_seq_len],
-                (cache_seq_len - seq_len) as i64, // offset
+                (cache_seq_len - seq_len) as i64,
                 &device,
             );
             scores = scores.mask_fill(mask.unsqueeze::<4>(), f32::NEG_INFINITY);
+            if debug {
+                println!("      After masking: hash={:016x}", tensor_hash(&scores));
+            }
         }
 
+        // Apply softmax with explicit float32 precision like HuggingFace
+        // HuggingFace: nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
         let scores = softmax(scores, 3);
+        if debug {
+            println!("      After softmax: hash={:016x}", tensor_hash(&scores));
+        }
 
         // Output [batch_size, num_heads, seq_len, head_dim]
         let output = scores.matmul(v);
+        if debug {
+            println!("      After scores*V: hash={:016x}", tensor_hash(&output));
+        }
+        
         let output = output
             .swap_dims(1, 2)
             .reshape([batch_size, seq_len, hidden_size]);
-        self.wo.forward(output)
+        if debug {
+            println!("      After reshape: hash={:016x}", tensor_hash(&output));
+        }
+            
+        let final_output = self.wo.forward(output);
+        if debug {
+            println!("      After output proj: hash={:016x}", tensor_hash(&final_output));
+        }
+        
+        final_output
     }
 
     /// Repeats a key or value tensor for grouped query attention.

@@ -18,7 +18,7 @@ use crate::ai::models::parts::{
 
 use super::parts::attn_decoder_mask;
 use super::*;
-use loaders::{load_mlp, load_rmsnorm, load_transformer_block};
+use loaders::{load_rmsnorm, load_transformer_block};
 
 #[derive(Module, Debug)]
 pub struct Llama<B: Backend> {

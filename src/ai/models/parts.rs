@@ -4,7 +4,7 @@ use burn::{
     module::{Module, Param},
     nn,
     tensor::{
-        Int, Tensor,
+        Tensor,
         activation::{silu, softmax},
         backend::Backend,
     },

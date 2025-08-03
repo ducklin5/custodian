@@ -4,14 +4,9 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::llama::{Cache, Config as LlamaConfig, Llama as LlamaModel};
 use hf_hub::{Repo, RepoType, api::sync::Api};
 use serde_json::Value;
-use std::{
-    io::Write,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
-use tokio;
 
-use crate::ai::prompts::email_classification_prompt;
 
 pub struct TextGenerator {
     model: LlamaModel,

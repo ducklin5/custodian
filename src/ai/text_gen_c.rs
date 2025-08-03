@@ -1,9 +1,10 @@
 use burn::{
     backend::{Wgpu, wgpu::WgpuDevice},
     module::Module,
-    nn::{RotaryEncoding, RotaryEncodingConfig},
     tensor::{Int, Tensor, TensorData},
 };
+
+use crate::ai::models::custom_rope::{CustomRotaryEncoding, CustomRotaryEncodingConfig};
 use tokenizers::Tokenizer as GTokenizer;
 
 use crate::ai::operators::sampling::Sampler;
@@ -14,6 +15,7 @@ use burn::record::{FullPrecisionSettings, Recorder};
 use burn_import::safetensors::{LoadArgs, SafetensorsFileRecorder};
 
 use wgpu::{Instance, InstanceDescriptor, Backends, RequestAdapterOptions};
+use md5;
 use pollster::block_on;
 
 // Define the backend. We use Wgpu with optimized tensor operations.
@@ -24,12 +26,31 @@ use crate::ai::models::llama::LlamaConfig;
 
 use super::models::transformer::{KeyValueCache, Transformer};
 
+// Helper function to compute tensor hash for debugging - concatenate all elements as strings and MD5 hash
+fn tensor_hash<B: burn::tensor::backend::Backend, const D: usize>(tensor: &Tensor<B, D>) -> u64 {
+    let data: Vec<f32> = tensor.clone().into_data().to_vec().unwrap();
+    
+    // Round each element to 3 decimal places and concatenate to string
+    let tensor_string: String = data.iter()
+        .map(|&val| format!("{:.3}", val))
+        .collect::<Vec<String>>()
+        .join("");
+    
+    // MD5 hash the concatenated string
+    let hash_bytes = md5::compute(tensor_string.as_bytes());
+    
+    // Convert first 8 bytes to u64 for display (little-endian to match Python)
+    u64::from_le_bytes([
+        hash_bytes[0], hash_bytes[1], hash_bytes[2], hash_bytes[3],
+        hash_bytes[4], hash_bytes[5], hash_bytes[6], hash_bytes[7],
+    ])
+}
 
 struct HFLlama {
     config: LlamaConfig,
     tokenizer: GTokenizer,
     model: Transformer<LBackend>,
-    rope: RotaryEncoding<LBackend>,
+    rope: CustomRotaryEncoding<LBackend>,
     cache: Vec<KeyValueCache<LBackend>>,
     device: WgpuDevice,
 }
@@ -87,9 +108,16 @@ impl HFLlama {
         let token_data = TensorData::new(tokens.clone(), [1, tokens.len()]);
         let token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &self.device);
         
-        // Run initial forward pass
-        let mut out = self.model.forward(token_tensor, pos, &mut self.cache, &self.rope);
+        println!("Input tensor hash: {:016x}", {
+            let float_tensor = token_tensor.clone().float();
+            tensor_hash(&float_tensor)
+        });
+        
+        // Run initial forward pass (debug enabled for first token)
+        let mut out = self.model.forward_with_debug(token_tensor, pos, &mut self.cache, &self.rope, true);
         pos += tokens.len();
+
+        println!("Model output tensor hash: {:016x}", tensor_hash(&out));
         
         println!("Output shape: {:?}", out.dims());
         
@@ -138,54 +166,12 @@ impl HFLlama {
         // Generate remaining tokens  
         let single_token_shape = [1, 1];
         
-        for i in 1..max_new_tokens.min(5) { // Limit to first 5 tokens for debugging
-            // Create tensor for single token
-            let token_data = TensorData::new(vec![next_token as i32], single_token_shape);
-            let token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &self.device);
-            
-            // Forward pass for single token
-            out = self.model.forward(token_tensor, pos, &mut self.cache, &self.rope);
-            pos += 1;
-            
-            // Extract logits
-            let logits = out.flatten(1, 2);
-            
-            // Debug logits for this step
-            let logits_data: Vec<f32> = logits.clone().into_data().to_vec().unwrap();
-            let mut indexed_logits: Vec<(usize, f32)> = logits_data.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-            indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-            
-            next_token = sampler.sample(logits).into_scalar() as u32;
-            
-            // Check for EOS token
-            if next_token == self.config.eos_token_id {
-                println!("Step {}: Hit EOS token", i);
-                break;
-            }
-            
-            // Decode and add to response
-            let token_text = self.tokenizer.decode(&[next_token], false).unwrap();
-            println!("Step {}: Token {} ('{}') - Top 3: {}/{}/{}", 
-                i, next_token, token_text,
-                indexed_logits[0].0, indexed_logits[1].0, indexed_logits[2].0);
-            response.push_str(&token_text);
-            
-            // Send to channel if provided
-            if let Some(channel) = &channel {
-                if let Err(_) = channel.send(token_text.clone()) {
-                    // Channel receiver has disconnected, but continue generation
-                }
-            }
-            
-            tokens.push(next_token as i32);
-        }
-        
         // Continue normal generation for remaining tokens
-        for _i in 5..max_new_tokens {
+        for _i in 1..max_new_tokens {
             let token_data = TensorData::new(vec![next_token as i32], single_token_shape);
             let token_tensor = Tensor::<LBackend, 2, Int>::from_data(token_data, &self.device);
             
-            out = self.model.forward(token_tensor, pos, &mut self.cache, &self.rope);
+            out = self.model.forward_with_debug(token_tensor, pos, &mut self.cache, &self.rope, false);
             pos += 1;
             
             let logits = out.flatten(1, 2);
@@ -345,7 +331,7 @@ impl HFLlama {
             })
             .collect::<Vec<_>>();
 
-        let rope = RotaryEncodingConfig::new(
+        let rope = CustomRotaryEncodingConfig::new(
             config.max_seq_len,
             config.hidden_size / config.num_attention_heads,
         )
@@ -372,6 +358,7 @@ mod test {
 
     use super::*;
     use burn::tensor::{Int, Tensor, TensorData};
+    
 
     #[test] 
     fn test_prefill_performance() -> Result<()> {
@@ -623,6 +610,122 @@ mod test {
     }
 
     #[test]
+    fn test_rotary_encoding_comparison() -> Result<()> {
+        println!("=== RUST ROTARY ENCODING DEBUG ===");
+        
+        let device = WgpuDevice::default();
+        let model_id = "HuggingFaceTB/SmolLM-135M";
+        let revision = "main";
+        
+        // Load tokenizer and model
+        let api = hf_hub::api::sync::Api::new()
+            .context("Failed to create Hugging Face API client")?;
+        let repo = api.repo(hf_hub::Repo::with_revision(
+            model_id.to_string(),
+            hf_hub::RepoType::Model,
+            revision.to_string(),
+        ));
+        
+        let tokenizer_filename = repo.get("tokenizer.json")
+            .context("Failed to get tokenizer.json")?;
+        let tokenizer = GTokenizer::from_file(tokenizer_filename).map_err(Error::msg)?;
+        
+        // Tokenize the same prompt as Python
+        let prompt = "The quick brown";
+        let tokens = tokenizer.encode(prompt, true).unwrap();
+        let tokens: Vec<i32> = tokens.get_ids().iter().map(|&x| x as i32).collect();
+        
+        println!("Input tokens: {:?}", tokens);
+        
+        // Model configuration (SmolLM-135M)
+        let hidden_size = 576;  
+        let num_attention_heads = 9;
+        let num_key_value_heads = 3;
+        let head_dim = hidden_size / num_attention_heads;  // 64
+        let rope_theta = 10000.0;
+        let max_seq_len = 2048;
+        
+        println!("Head dim: {}", head_dim);
+        println!("Rope theta: {}", rope_theta);
+        
+        // Create rotary encoding to match Python
+        let rope_config = CustomRotaryEncodingConfig::new(max_seq_len, head_dim)
+            .with_theta(rope_theta as f32);
+        let rope = rope_config.init(&device);
+        
+        // Create test Q and K tensors with known values to match Python test results
+        let batch_size = 1;
+        let seq_len = tokens.len();
+        
+        // Create test data that will give us known rotary encoding results
+        let q_data: Vec<f32> = (0..batch_size * num_attention_heads * seq_len * head_dim)
+            .map(|i| (i as f32) * 0.01)
+            .collect();
+        let k_data: Vec<f32> = (0..batch_size * num_key_value_heads * seq_len * head_dim)
+            .map(|i| (i as f32) * 0.01 + 100.0)  // Offset K values
+            .collect();
+            
+        let q = Tensor::<LBackend, 4>::from_data(
+            TensorData::new(q_data, [batch_size, num_attention_heads, seq_len, head_dim]),
+            &device
+        );
+        let k = Tensor::<LBackend, 4>::from_data(
+            TensorData::new(k_data, [batch_size, num_key_value_heads, seq_len, head_dim]),
+            &device
+        );
+        
+        println!("Q before RoPE: hash={:016x}, shape={:?}", tensor_hash(&q), q.dims());
+        println!("K before RoPE: hash={:016x}, shape={:?}", tensor_hash(&k), k.dims());
+        
+        // Apply rotary encoding at position 0 (start of sequence)
+        let start_position = 0;
+        let (q_rope, k_rope) = rope.apply_rope(q.clone(), k.clone(), start_position);
+        
+        println!("Q after RoPE: hash={:016x}, shape={:?}", tensor_hash(&q_rope), q_rope.dims());
+        println!("K after RoPE: hash={:016x}, shape={:?}", tensor_hash(&k_rope), k_rope.dims());
+        
+        // Extract and print some values for manual verification
+        let q_vals: Vec<f32> = q.clone().into_data().to_vec().unwrap();
+        let q_rope_vals: Vec<f32> = q_rope.clone().into_data().to_vec().unwrap();
+        let k_vals: Vec<f32> = k.clone().into_data().to_vec().unwrap();
+        let k_rope_vals: Vec<f32> = k_rope.clone().into_data().to_vec().unwrap();
+        
+        println!("\nFirst few Q values before RoPE: {:?}", &q_vals[0..5]);
+        println!("First few Q values after RoPE: {:?}", &q_rope_vals[0..5]);
+        println!("First few K values before RoPE: {:?}", &k_vals[0..5]);
+        println!("First few K values after RoPE: {:?}", &k_rope_vals[0..5]);
+        
+        // Test position 0: For theta=10000, position=0, RoPE should be identity (cos=1, sin=0)
+        // So Q and K should be unchanged
+        let q_first_token = &q_vals[0..head_dim];
+        let q_rope_first_token = &q_rope_vals[0..head_dim];
+        
+        println!("\n=== MANUAL ROTARY VERIFICATION ===");
+        println!("Original Q (first token, first head): {:?}", &q_first_token[0..8]);
+        println!("RoPE Q (first token, first head): {:?}", &q_rope_first_token[0..8]);
+        
+        // For position 0, cos=1 and sin=0, so RoPE should be identity
+        let diff: Vec<f32> = q_first_token.iter()
+            .zip(q_rope_first_token.iter())
+            .map(|(a, b)| (a - b).abs())
+            .collect();
+        let max_diff = diff.iter().fold(0.0f32, |a, &b| a.max(b));
+        println!("Max difference for pos=0 (should be ~0): {:.10}", max_diff);
+        
+        // Test with position 1 to see actual rotation
+        let start_position_1 = 1;
+        let (q_rope_1, _) = rope.apply_rope(q.clone(), k.clone(), start_position_1);
+        
+        println!("\n=== POSITION 1 TEST ===");
+        println!("Q after RoPE (pos=1): hash={:016x}", tensor_hash(&q_rope_1));
+        
+        let q_rope_1_vals: Vec<f32> = q_rope_1.clone().into_data().to_vec().unwrap();
+        println!("First few Q values after RoPE (pos=1): {:?}", &q_rope_1_vals[0..5]);
+        
+        Ok(())
+    }
+
+    #[test]
     fn test_generate_method() -> Result<()> {
         let device = WgpuDevice::default();
         let model_id = "HuggingFaceTB/SmolLM-135M";
@@ -633,7 +736,7 @@ mod test {
             .context("Failed to load Llama model")?;
         
         let prompt = "The quick brown".to_string();
-        let response = llama.generate(prompt.clone(), Some(100), None)?;
+        let response = llama.generate(prompt.clone(), Some(3), None)?;
         
         println!("Prompt: {}", prompt);
         println!("Generated: {}", response);

@@ -238,7 +238,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
     let mut smart_grouping = use_signal(|| false);
 
     let mut messages_by_sender = use_signal(|| HashMap::<String, Vec<MessageInfo>>::new());
-    let mut messages_by_category = use_signal(|| HashMap::<String, Vec<MessageInfo>>::new());
+    let messages_by_category = use_signal(|| HashMap::<String, Vec<MessageInfo>>::new());
     
     // Create generator once, outside of effects
     let generator = use_signal_sync(|| crate::ai::text_gen::init_text_gen(None, Some(vec!["]"])).unwrap());
@@ -261,7 +261,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
     use_effect(move || {
         if smart_grouping() {
             let messages_clone = messages.clone();
-            let mut groups: HashMap<String, Vec<u32>> = HashMap::new();
+            let groups: HashMap<String, Vec<u32>> = HashMap::new();
             let result = tokio::task::spawn_blocking(move || {
                 for msg in messages_clone.read().iter() {
                     let prompt = email_classification_prompt(&msg.subject, &msg.sender);

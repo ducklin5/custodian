@@ -95,7 +95,7 @@ mod test {
     use super::*;
     use burn::tensor::{Int, Tensor, TensorData};
     use num_traits::ToPrimitive;
-    use std::io::Read;
+    
     use std::io::Write;
     //#[test]
     fn test_load_llama_from_hf() -> Result<()> {
@@ -121,7 +121,7 @@ mod test {
             .map(|&x| x as i32)
             .collect::<Vec<_>>();
         let mut text = String::new();
-        let mut generated_tokens = 0;
+        let generated_tokens = 0;
         let max_tokens = 30; // Shorter for better quality
 
         let remaining = std::cmp::min(max_tokens, config.max_seq_len) - tokens.len();

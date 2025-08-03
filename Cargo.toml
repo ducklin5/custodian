@@ -38,6 +38,7 @@ burn-ndarray = "0.18.0"
 burn-wgpu = "0.18.0"
 wgpu = "0.19"
 pollster = "0.4.0"
+md5 = "0.7"
 
 [profile]
 

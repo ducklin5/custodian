@@ -1,4 +1,4 @@
-use burn::tensor::{backend::Backend, bf16, f16, Bool, TensorData, Device, Element, Float, Int, Shape, Tensor};
+use burn::tensor::{backend::Backend, bf16, f16, Bool, TensorData, Device, Element, Float, Int, Tensor};
 use safetensors::{Dtype, SafeTensors};
 
 pub trait SafeTensorsReader {
