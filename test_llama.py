@@ -42,6 +42,7 @@ print(f"  max_position_embeddings: {model.config.max_position_embeddings}")
 print(f"  rms_norm_eps: {model.config.rms_norm_eps}")
 print(f"  rope_theta: {model.config.rope_theta}")
 print(f"  tie_word_embeddings: {model.config.tie_word_embeddings}")
+print(f"  hidden_act: {model.config.hidden_act}")
 
 # Manual generation with debugging
 model.eval()

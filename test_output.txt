@@ -1,0 +1,205 @@
+   Compiling custodian v0.1.0 (E:\dev\Custodian)
+error[E0432]: unresolved import `loaders`
+  --> src\ai\models\llama\mod.rs:18:5
+   |
+18 | use loaders::{load_rmsnorm, load_transformer_block};
+   |     ^^^^^^^ use of unresolved module or unlinked crate `loaders`
+   |
+   = help: if you wanted to use a crate named `loaders`, use `cargo add loaders` to add it to your `Cargo.toml`
+
+warning: unused import: `Param`
+ --> src\ai\text_gen_c.rs:3:22
+  |
+3 |     module::{Module, Param},
+  |                      ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `Embedding` and `Param`
+ --> src\ai\models\llama\mod.rs:2:22
+  |
+2 |     module::{Module, Param},
+  |                      ^^^^^
+3 |     nn::{self, Embedding},
+  |                ^^^^^^^^^
+
+warning: unused import: `safetensors::SafeTensors`
+ --> src\ai\models\llama\mod.rs:6:5
+  |
+6 | use safetensors::SafeTensors;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RotaryEncodingConfig`
+  --> src\ai\models\llama\mod.rs:13:61
+   |
+13 |     ResidualDecoderAttentionBlock, RmsNorm, RotaryEncoding, RotaryEncodingConfig,
+   |                                                             ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::parts::attn_decoder_mask`
+  --> src\ai\models\llama\mod.rs:16:5
+   |
+16 | use super::parts::attn_decoder_mask;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+  --> src\ai\models\llama\mod.rs:17:5
+   |
+17 | use super::*;
+   |     ^^^^^^^^
+
+warning: unexpected `cfg` condition value: `cuda`
+   --> src\ai\models\transformer\mod.rs:608:11
+    |
+608 | #[cfg(any(feature = "cuda", feature = "tch-gpu"))]
+    |           ^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `wgpu`
+    = help: consider adding `cuda` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `tch-gpu`
+   --> src\ai\models\transformer\mod.rs:608:29
+    |
+608 | #[cfg(any(feature = "cuda", feature = "tch-gpu"))]
+    |                             ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `wgpu`
+    = help: consider adding `tch-gpu` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `TensorData`
+ --> src\ai\models\custom_rope.rs:4:48
+  |
+4 |     tensor::{backend::Backend, Device, Tensor, TensorData},
+  |                                                ^^^^^^^^^^
+
+warning: use of deprecated unit variant `burn::backend::burn_wgpu::WgpuDevice::BestAvailable`
+  --> src\ai\operators\outer.rs:31:30
+   |
+31 |     let device = WgpuDevice::BestAvailable;
+   |                              ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: unused variable: `session_arc`
+  --> src\pages\auth.rs:64:21
+   |
+64 |         Some(Ok(ref session_arc)) => {
+   |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_arc`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `sorted_msg_by_category`
+   --> src\pages\organizer.rs:286:9
+    |
+286 |     let sorted_msg_by_category = msg_by_category
+    |         ^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sorted_msg_by_category`
+
+warning: unused variable: `result`
+   --> src\pages\organizer.rs:265:17
+    |
+265 |             let result = tokio::task::spawn_blocking(move || {
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+
+warning: unused variable: `debug_tokens`
+   --> src\ai\text_gen.rs:260:13
+    |
+260 |         let debug_tokens = self
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_debug_tokens`
+
+warning: unused variable: `max_tokens`
+   --> src\ai\text_gen_c.rs:372:13
+    |
+372 |         let max_tokens = 1; // Just test prefill performance
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_tokens`
+
+warning: unused variable: `total_start`
+   --> src\ai\text_gen_c.rs:375:13
+    |
+375 |         let total_start = Instant::now();
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_total_start`
+
+warning: unused variable: `temperature`
+   --> src\ai\text_gen_c.rs:389:13
+    |
+389 |         let temperature = 0.0; // Use greedy for fastest sampling
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_temperature`
+
+warning: unused variable: `top_p`
+   --> src\ai\text_gen_c.rs:390:13
+    |
+390 |         let top_p = 0.9;
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_top_p`
+
+warning: unused variable: `seed`
+   --> src\ai\text_gen_c.rs:391:13
+    |
+391 |         let seed = 10;
+    |             ^^^^ help: if this is intentional, prefix it with an underscore: `_seed`
+
+warning: unused variable: `config`
+   --> src\ai\text_gen_c.rs:408:13
+    |
+408 |             config,
+    |             ^^^^^^ help: try ignoring the field: `config: _`
+
+warning: unused variable: `sampler`
+   --> src\ai\text_gen_c.rs:437:21
+    |
+437 |             let mut sampler = Sampler::Argmax;
+    |                     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sampler`
+
+warning: unused variable: `out`
+   --> src\ai\text_gen_c.rs:447:17
+    |
+447 |             let out = model.forward(token_tensor, pos, &mut cache, &rope);
+    |                 ^^^ help: if this is intentional, prefix it with an underscore: `_out`
+
+warning: variable does not need to be mutable
+   --> src\ai\text_gen_c.rs:437:17
+    |
+437 |             let mut sampler = Sampler::Argmax;
+    |                 ----^^^^^^^
+    |                 |
+    |                 help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> src\ai\text_gen_c.rs:441:17
+    |
+441 |             let mut pos = 0;
+    |                 ----^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: unnecessary `unsafe` block
+   --> src\ai\models\parts.rs:287:24
+    |
+287 |         let trig_vec = unsafe { vec![p_cos, p_sin] };
+    |                        ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` on by default
+
+warning: unused variable: `half_dim`
+  --> src\ai\models\custom_rope.rs:63:13
+   |
+63 |         let half_dim = self.head_dim / 2;
+   |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_half_dim`
+
+warning: unused variable: `batch_size`
+   --> src\ai\models\custom_rope.rs:132:14
+    |
+132 |         let [batch_size, num_heads, seq_len, head_dim] = x.dims();
+    |              ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_batch_size`
+
+warning: unused variable: `num_heads`
+   --> src\ai\models\custom_rope.rs:132:26
+    |
+132 |         let [batch_size, num_heads, seq_len, head_dim] = x.dims();
+    |                          ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_heads`
+
+For more information about this error, try `rustc --explain E0432`.
+warning: `custodian` (bin "custodian" test) generated 28 warnings
+error: could not compile `custodian` (bin "custodian" test) due to 1 previous error; 28 warnings emitted

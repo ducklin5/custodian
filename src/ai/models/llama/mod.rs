@@ -1,5 +1,3 @@
-mod loaders;
-
 use burn::{
     module::{Module, Param},
     nn::{self, Embedding},
@@ -11,14 +9,12 @@ use anyhow::{Context, Result};
 
 use serde::Deserialize;
 
-use crate::ai::loaders::WgpuFloatTensorReader;
 use crate::ai::models::parts::{
     ResidualDecoderAttentionBlock, RmsNorm, RotaryEncoding, RotaryEncodingConfig,
 };
 
 use super::parts::attn_decoder_mask;
 use super::*;
-use loaders::{load_rmsnorm, load_transformer_block};
 
 #[derive(Module, Debug)]
 pub struct Llama<B: Backend> {
@@ -108,61 +104,61 @@ impl LlamaConfig {
             .context(format!("Failed to parse config file: {}", path))?;
         Ok(config)
     }
-    pub fn build_pretrained<B: Backend>(
-        &self,
-        device: &B::Device,
-        safetensors: &SafeTensors,
-    ) -> Llama<B> {
-        let mut blocks: Vec<ResidualDecoderAttentionBlock<B>> =
-            Vec::with_capacity(self.num_hidden_layers);
-        for i in 0..self.num_hidden_layers {
-            println!(
-                "loading transformer layer {} of {}",
-                i, self.num_hidden_layers
-            );
-            let transformer_block = load_transformer_block::<B>(
-                safetensors,
-                self,
-                &format!("model.layers.{}", i),
-                device,
-            );
-            blocks.push(transformer_block);
-        }
+    //pub fn build_pretrained<B: Backend>(
+    //    &self,
+    //    device: &B::Device,
+    //    safetensors: &SafeTensors,
+    //) -> Llama<B> {
+    //    let mut blocks: Vec<ResidualDecoderAttentionBlock<B>> =
+    //        Vec::with_capacity(self.num_hidden_layers);
+    //    for i in 0..self.num_hidden_layers {
+    //        println!(
+    //            "loading transformer layer {} of {}",
+    //            i, self.num_hidden_layers
+    //        );
+    //        let transformer_block = load_transformer_block::<B>(
+    //            safetensors,
+    //            self,
+    //            &format!("model.layers.{}", i),
+    //            device,
+    //        );
+    //        blocks.push(transformer_block);
+    //    }
 
-        let embed_tokens = safetensors.read_full_float::<B, 2>("model.embed_tokens.weight", device);
+    //    let embed_tokens = safetensors.read_full_float::<B, 2>("model.embed_tokens.weight", device);
 
-        let [_n_vacab, n_state] = embed_tokens.dims();
-        let n_heads = self.num_attention_heads;
-        let _n_kv_heads = self.num_key_value_heads;
-        let head_dim = n_state / n_heads;
-        let token_embedding = Embedding {
-            weight: Param::from_tensor(embed_tokens),
-        };
-        let rotary_encoding =
-            RotaryEncodingConfig::new(self.max_seq_len, head_dim, self.rope_theta).init(device);
-        let norm = load_rmsnorm::<B>(safetensors, self, "model.norm", device);
-        // sometimes lm_head is also called "output"
-        let lm_head_key = if safetensors.names().contains(&"lm_head.weight") {
-            "lm_head.weight"
-        } else {
-            "model.embed_tokens.weight"
-        };
-        let lm_head = safetensors.read_full_float::<B, 2>(lm_head_key, device);
-        let lm_head = nn::Linear {
-            weight: Param::from_tensor(lm_head.transpose()),
-            bias: None,
-        };
-        let mask = attn_decoder_mask::<B>(self.max_seq_len, device);
-        let _norm_eps = norm.eps;
+    //    let [_n_vacab, n_state] = embed_tokens.dims();
+    //    let n_heads = self.num_attention_heads;
+    //    let _n_kv_heads = self.num_key_value_heads;
+    //    let head_dim = n_state / n_heads;
+    //    let token_embedding = Embedding {
+    //        weight: Param::from_tensor(embed_tokens),
+    //    };
+    //    let rotary_encoding =
+    //        RotaryEncodingConfig::new(self.max_seq_len, head_dim, self.rope_theta).init(device);
+    //    let norm = load_rmsnorm::<B>(safetensors, self, "model.norm", device);
+    //    // sometimes lm_head is also called "output"
+    //    let lm_head_key = if safetensors.names().contains(&"lm_head.weight") {
+    //        "lm_head.weight"
+    //    } else {
+    //        "model.embed_tokens.weight"
+    //    };
+    //    let lm_head = safetensors.read_full_float::<B, 2>(lm_head_key, device);
+    //    let lm_head = nn::Linear {
+    //        weight: Param::from_tensor(lm_head.transpose()),
+    //        bias: None,
+    //    };
+    //    let mask = attn_decoder_mask::<B>(self.max_seq_len, device);
+    //    let _norm_eps = norm.eps;
 
-        Llama {
-            token_embedding,
-            rotary_encoding,
-            blocks,
-            norm,
-            lm_head,
-            mask,
-            max_seq_len: self.max_seq_len,
-        }
-    }
+    //    Llama {
+    //        token_embedding,
+    //        rotary_encoding,
+    //        blocks,
+    //        norm,
+    //        lm_head,
+    //        mask,
+    //        max_seq_len: self.max_seq_len,
+    //    }
+    //}
 }

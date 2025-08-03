@@ -11,6 +11,9 @@ use burn::{
 };
 use std::f32::NEG_INFINITY;
 
+// Import tensor_hash from transformer module
+use super::transformer::tensor_hash;
+
 #[derive(Module, Debug)]
 pub struct MultiHeadSelfAttention<B: Backend> {
     pub n_heads: usize,
@@ -131,6 +134,29 @@ impl<B: Backend> RmsNorm<B> {
     }
 }
 
+#[derive(Config, Debug)]
+pub struct MlpConfig {
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub bias: bool,
+}
+
+impl MlpConfig {
+    pub fn init<B: Backend>(&self, device: &burn::tensor::Device<B>) -> Mlp<B> {
+        Mlp {
+            gate_proj: nn::LinearConfig::new(self.intermediate_size, self.hidden_size)
+                .with_bias(self.bias)
+                .init(device),
+            up_proj: nn::LinearConfig::new(self.intermediate_size, self.hidden_size)
+                .with_bias(self.bias)
+                .init(device),
+            down_proj: nn::LinearConfig::new(self.hidden_size, self.intermediate_size)
+                .with_bias(self.bias)
+                .init(device),
+        }
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct Mlp<B: Backend> {
     // w1
@@ -142,9 +168,40 @@ pub struct Mlp<B: Backend> {
 }
 
 impl<B: Backend> Mlp<B> {
-    fn forward(&self, xs: Tensor<B, 3>) -> Tensor<B, 3> {
-        let xs = silu(self.gate_proj.forward(xs.clone())) * self.up_proj.forward(xs.clone());
-        self.down_proj.forward(xs)
+    pub fn forward(&self, xs: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.forward_with_debug(xs, false)
+    }
+
+    pub fn forward_with_debug(&self, xs: Tensor<B, 3>, debug: bool) -> Tensor<B, 3> {
+        if debug {
+            println!("      FFN input: hash={:016x}", tensor_hash(&xs));
+            
+            // Print full input tensor values for layer 0
+            let input_data: Vec<f32> = xs.clone().into_data().to_vec().unwrap();
+            println!("      FFN input tensor (first 20 values): {:?}", &input_data[..20.min(input_data.len())]);
+            
+            // Debug weight hashes and shapes
+            println!("      Gate proj weight: hash={:016x}, shape={:?}", tensor_hash(&self.gate_proj.weight.val()), self.gate_proj.weight.val().dims());
+            println!("      Up proj weight: hash={:016x}, shape={:?}", tensor_hash(&self.up_proj.weight.val()), self.up_proj.weight.val().dims());
+            println!("      Down proj weight: hash={:016x}, shape={:?}", tensor_hash(&self.down_proj.weight.val()), self.down_proj.weight.val().dims());
+
+            // Print first few weight values
+            let gate_weight_data: Vec<f32> = self.gate_proj.weight.val().clone().into_data().to_vec().unwrap();
+            println!("      Gate proj weight (first 10 values): {:?}", &gate_weight_data[..10.min(gate_weight_data.len())]);
+        }
+        
+        // Updated MLP implementation to match your specification
+        let xs_combined = silu(self.gate_proj.forward(xs.clone())) * self.up_proj.forward(xs.clone());
+        let final_output = self.down_proj.forward(xs_combined);
+        
+        if debug {
+            println!("      After down_proj: hash={:016x}", tensor_hash(&final_output));
+            let final_data: Vec<f32> = final_output.clone().into_data().to_vec().unwrap();
+            println!("      Final MLP output (first 20 values): {:?}", &final_data[..20.min(final_data.len())]);
+            println!("      Final MLP output (last 20 values): {:?}", &final_data[final_data.len().saturating_sub(20)..]);
+        }
+        
+        final_output
     }
 }
 
