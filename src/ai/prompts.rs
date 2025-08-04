@@ -23,33 +23,29 @@ pub fn format_complex_prompt(
     formatted_prompt
 }
 
-pub fn email_classification_prompt(subject: &str, sender: &str) -> String {
-    format!(
-r#"Email Classification Task:
+pub fn email_classification_prompt(categories: Vec<String>, subject: &str, sender: &str) -> String {
+    format!( r#"Classify the following email into 1-3 categories based on its subject and sender.
 
-Classify the following email into 1-5 categories based on its subject and sender.
-You maybe use 
+You can use a new category or use an existing category.
+These are the existing categories: {:?}
+New categories must be less that 3 words
+The category list must be comma separated and must end with `<|end:categories|>` after the last category.
 
 Example 1:
-Subject: Special Offer - 50% Off
-Sender: sales@store.com
-Categories: [Marketing, Promotions]
+Subject: <|start:subject|> Meeting tomorrow at 2pm <|end:subject|>
+Sender: <|start:sender|> boss@company.com <|end:sender|>
+Categories: <|start:categories|> Work, Notifications, Meetings <|end:categories|>
 
 Example 2:
-Subject: Meeting tomorrow at 2pm
-Sender: boss@company.com
-Categories: [Work, Notifications, Meetings]
+Subject: <|start:subject|> Your invoice is ready <|end:subject|>
+Sender: <|start:sender|> noreply@billing.com <|end:sender|>
+Categories: <|start:categories|> Finance, Invoices <|end:categories|>
 
-Example 3:
-Subject: Your invoice is ready
-Sender: noreply@billing.com
-Categories: [Finance, Invoices]
-
-Example 4:
-Subject: {}
-Sender: {}
-Categories: ["#,
-        subject, sender
+Task:
+Subject: <|start:subject|> {} <|end:subject|>
+Sender: <|start:sender|> {} <|end:sender|>
+Categories: <|start:categories|>"#,
+        categories, subject, sender
     )
 }
 

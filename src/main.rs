@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 mod utils;
 mod pages;
 mod ai;
+mod db;
 
 use utils::AsyncPtrProp;
 use pages::*;

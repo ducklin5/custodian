@@ -61,7 +61,7 @@ pub fn AuthPage(
                 }
             }
         },
-        Some(Ok(ref session_arc)) => {
+        Some(Ok(ref _session_arc)) => {
             rsx! {
                 div { class: "min-h-screen flex flex-col items-center justify-center bg-slate-100 gap-6",
                     div { class: "bg-white p-8 rounded-2xl shadow-lg min-w-[350px] w-full max-w-md text-center",

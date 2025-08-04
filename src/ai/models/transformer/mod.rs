@@ -100,6 +100,7 @@ impl TransformerConfig {
             layers,
             norm,
             output,
+            debug_layers: 1,
         }
     }
 }
@@ -111,7 +112,7 @@ pub struct Transformer<B: Backend> {
     layers: Vec<TransformerBlock<B>>,
     norm: RmsNorm<B>,
     output: Option<Linear<B>>,
-    // NOTE: Starting with Llama 3.2, the weights of the output layer are tied with the embedding
+    debug_layers: usize,
 }
 
 impl<B: Backend> Transformer<B> {
@@ -147,7 +148,7 @@ impl<B: Backend> Transformer<B> {
         }
 
         for (i, (layer, c)) in self.layers.iter().zip(cache.into_iter()).enumerate() {
-            if debug && i < 1 {
+            if debug && i < self.debug_layers {
                 let h_before = h.clone();
                 h = layer.forward_with_debug(h, c, rope, debug);
                 if debug {

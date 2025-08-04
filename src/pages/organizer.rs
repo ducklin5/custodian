@@ -1,9 +1,16 @@
+use dioxus::prelude::*;
+
+use burn::backend::wgpu::WgpuDevice;
+
+use itertools::Itertools;
+
 use std::collections::HashMap;
 
 use crate::utils::AsyncPtrProp;
+use crate::ai::models::llama::HFLlama;
 use crate::ai::prompts::email_classification_prompt;
-use dioxus::prelude::*;
-use itertools::Itertools;
+
+const FETCH_BATCH_SIZE: u32 = 200;
 
 #[derive(Clone, Props, PartialEq)]
 pub struct OrganizerPageProps {
@@ -31,7 +38,7 @@ struct MessageInfo {
 fn fetch_messages(
     session: AsyncPtrProp<imap::Session<native_tls::TlsStream<std::net::TcpStream>>>,
     mailbox: String,
-    mut msg_count: Signal<u32, SyncStorage>,
+    mut server_msg_count: Signal<u32, SyncStorage>,
     mut msg_signal: Signal<Vec<MessageInfo>, SyncStorage>,
     with_body: bool,
 ) -> Result<Vec<MessageInfo>, String> {
@@ -64,7 +71,7 @@ fn fetch_messages(
             Ok(uids) => {
                 let uid_list: Vec<u32> = uids.into_iter().collect();
                 println!("Found {} UIDs", uid_list.len());
-                msg_count.set(uid_list.len() as u32);
+                server_msg_count.set(uid_list.len() as u32);
                 if uid_list.is_empty() {
                     println!("No UIDs found - trying alternative approach...");
                     // Try a different approach for Yahoo's limited view
@@ -72,7 +79,7 @@ fn fetch_messages(
                         Ok(alt_uids) => {
                             let alt_list: Vec<u32> = alt_uids.into_iter().collect();
                             println!("Alternative search found {} UIDs", alt_list.len());
-                            msg_count.set(alt_list.len() as u32);
+                            server_msg_count.set(alt_list.len() as u32);
                             alt_list
                         }
                         Err(e) => {
@@ -90,9 +97,8 @@ fn fetch_messages(
 
         // Fetch messages with pagination
         let mut all_message_infos: Vec<MessageInfo> = Vec::new();
-        let BATCH_SIZE = 200;
 
-        for batch in uid_vec.chunks(BATCH_SIZE as usize) {
+        for batch in uid_vec.chunks(FETCH_BATCH_SIZE as usize) {
             let sequence_set = batch.iter().map(|uid| format!("{}", uid)).join(",");
             println!("Fetching UID batch: {}...", sequence_set);
 
@@ -199,53 +205,78 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
         on_back,
     } = props;
 
-    let loading = use_signal(|| true);
-    let error = use_signal(|| Option::<String>::None);
-    let mut messages = use_signal_sync(|| Vec::<MessageInfo>::new());
-    let msg_count = use_signal_sync(|| 0);
+    let mut msg_fetch_done = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+    let mut messages_signal = use_signal_sync(|| Vec::<MessageInfo>::new());
+    let server_msg_count = use_signal_sync(|| 0);
+    let mut smart_progress = use_signal_sync(|| 0);
+    let mut smart_complete = use_signal_sync(|| false);
+    let session_signal = use_signal_sync(|| session.clone());
+    let mailbox_signal = use_signal_sync(|| mailbox.clone());
+    let mut group_by_sender = use_signal(|| false);
+    let mut group_by_category_active = use_signal(|| false);
 
-    let mailbox2 = mailbox.clone();
-    let session2 = session.clone();
+    let mut messages_by_sender = use_signal_sync(|| HashMap::<String, Vec<MessageInfo>>::new());
+    let messages_by_category = use_signal_sync(|| HashMap::<String, Vec<MessageInfo>>::new());
+    
+    // Generator loading state
+    let mut generator_loading = use_signal(|| true);
+    let mut generator = use_signal_sync(|| Option::<AsyncPtrProp<HFLlama>>::None);
 
 
     // Fetch messages when component mounts
     use_effect(move || {
-        let session_clone = session.clone();
-        let mailbox_clone = mailbox2.clone();
-        let messages_clone = messages.clone();
-        let msg_count_clone = msg_count.clone();
-        let mut loading_clone = loading.clone();
-        let mut error_clone = error.clone();
-
         spawn(async move {
             let result =
-                tokio::task::spawn_blocking(move || fetch_messages(session_clone, mailbox_clone, msg_count_clone, messages_clone, false))
+                tokio::task::spawn_blocking(move || fetch_messages(session_signal().clone(), mailbox_signal(), server_msg_count.clone(), messages_signal.clone(), false))
                     .await
                     .unwrap();
             match result {
                 Ok(msg_infos) => {
-                    messages.set(msg_infos);
+                    messages_signal.set(msg_infos);
                 }
                 Err(e) => {
-                    error_clone.set(Some(e));
+                    error.set(Some(e));
                 }
             }
-            loading_clone.set(false);
+            msg_fetch_done.set(true);
         });
     });
 
-    let mut group_by_sender = use_signal(|| false);
-    let mut smart_grouping = use_signal(|| false);
-
-    let mut messages_by_sender = use_signal(|| HashMap::<String, Vec<MessageInfo>>::new());
-    let messages_by_category = use_signal(|| HashMap::<String, Vec<MessageInfo>>::new());
     
-    // Create generator once, outside of effects
-    let generator = use_signal_sync(|| crate::ai::text_gen::init_text_gen(None, Some(vec!["]"])).unwrap());
+    // Initialize model in use_effect
+    use_effect(move || {
+        spawn(async move {
+            let device = WgpuDevice::default();
+            let model_id = "HuggingFaceTB/SmolLM2-135M";
+            let revision = "main";
+            
+            println!("Loading model for generate test...");
+            let result = tokio::task::spawn_blocking(move || {
+                let mut model = HFLlama::new(model_id, revision, device).expect("Failed to load Llama model");
+                model.add_terminator("<|end:categories|>");
+                model.add_terminator("<");
+                model.add_terminator("\n");
+                model.add_terminator("Task");
+                AsyncPtrProp::new(model)
+            }).await;
+            
+            match result {
+                Ok(model) => {
+                    generator.set(Some(model));
+                    generator_loading.set(false);
+                }
+                Err(e) => {
+                    println!("Failed to load model: {:?}", e);
+                    generator_loading.set(false);
+                }
+            }
+        });
+    });
 
     use_effect(move || {
         if group_by_sender() {
-            let map: HashMap<String, Vec<MessageInfo>> = messages
+            let map: HashMap<String, Vec<MessageInfo>> = messages_signal
                 .read()
                 .iter()
                 .into_grouping_map_by(|m| m.sender.clone())
@@ -258,34 +289,59 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
         }
     });
 
-    use_effect(move || {
-        if smart_grouping() {
-            let messages_clone = messages.clone();
-            let groups: HashMap<String, Vec<u32>> = HashMap::new();
-            let result = tokio::task::spawn_blocking(move || {
+    let group_by_category_callback = use_callback(move |_| {
+        if !generator_loading() && generator().is_some() {
+            group_by_category_active.set(true);
+            let messages_clone = messages_signal.clone();
+            let mut messages_by_category_clone = messages_by_category.clone();
+            let generator_clone = generator.clone();
+            let _result = tokio::task::spawn_blocking(move || {
+                let mut progress = 0;
                 for msg in messages_clone.read().iter() {
-                    let prompt = email_classification_prompt(&msg.subject, &msg.sender);
-                    let result = generator().lock().unwrap().prompt(prompt).unwrap_or("Err".into());
-                    println!("Result: {:?}", result);
-                    //let labels = result.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>();
-                    //for label in labels {
-                    //    groups.entry(label).or_insert(Vec::new()).push(msg.uid);
-                    //}   
-                    println!("Groups: {:?}", groups);
+                    let mut groups = messages_by_category_clone.write();
+                    let top_5_categories = groups.iter().sorted_by(|a, b| b.1.len().cmp(&a.1.len())).take(5).map(|k| k.0.clone()).collect::<Vec<_>>();
+                    let prompt = email_classification_prompt(top_5_categories, &msg.subject, &msg.sender);
+                    if let Some(model) = generator_clone() {
+                        let result = model.lock().unwrap().generate(prompt, None, None).unwrap_or("Err".into());
+                        let labels = result
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .unique()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>();
+                        println!("Labels: {:?}", labels);
+                        for label in labels {
+                            groups.entry(label).or_insert(Vec::new()).push(msg.clone());
+                        }
+                    }
+                    progress += 1;
+                    *smart_progress.write() = progress;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
+                *smart_complete.write() = true;
             });
         }
     });
 
-    let msg_by_sender: HashMap<String, Vec<MessageInfo>> = messages_by_sender();
-    let sorted_msg_by_sender = msg_by_sender
+    let local_msg_count = messages_signal.read().len();
+    let sorted_msg_by_sender = {
+        let msg_by_sender = messages_by_sender.read();
+        msg_by_sender
         .iter()
-        .sorted_by(|a, b| b.1.len().cmp(&a.1.len()));
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
+        .collect::<Vec<_>>()
+    };
 
-    let msg_by_category: HashMap<String, Vec<MessageInfo>> = messages_by_category();
-    let sorted_msg_by_category = msg_by_category
-        .iter()
-        .sorted_by(|a, b| b.1.len().cmp(&a.1.len()));
+    
+    let sorted_msg_by_category = {
+        let msg_by_category = messages_by_category.read();
+        msg_by_category
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
+            .collect::<Vec<_>>()
+    };
 
     rsx! {
         div { class: "min-h-screen flex flex-col items-center justify-center bg-slate-500 gap-6 p-20",
@@ -293,21 +349,21 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                 h1 { class: "text-2xl font-bold text-blue-700 mb-4", "Mailbox Organizer" }
                 div { class: "mb-4",
                     p { class: "text-gray-600", "Email: {email}" }
-                    p { class: "text-gray-600", "Mailbox: {mailbox}" }
+                    p { class: "text-gray-600", "Mailbox: {mailbox_signal()}" }
                 }
 
-                if loading() {
+                if !msg_fetch_done() {
                     div { class: "mb-6",
                         p { class: "text-gray-600", "Loading messages..." }
-                        p { class: "text-gray-600", "Messages fetched: {messages.len()} / {msg_count()}" }
+                        p { class: "text-gray-600", "Messages fetched: {local_msg_count} / {server_msg_count()}" }
                     }
-                } else if let Some(err) = error() {
+                }  else if let Some(err) = error() {
                     div { class: "mb-6",
                         p { class: "text-red-600", "Error: {err}" }
                     }
                 } else {
                     div { class: "mb-6",
-                        p { class: "text-gray-600 mb-4", "Found {messages.len()} messages" }
+                        p { class: "text-gray-600 mb-4", "Found {local_msg_count} messages" }
                         div { class: "max-h-96 overflow-y-auto border-spacing-0",
                             style: "box-shadow: inset 10px -8px 8px -8px rgba(0, 0, 0, 0.5), inset -10px 0 8px 8px rgba(0, 0, 0, 0.5);",
                             table { class: "w-full border-separate border-spacing-0",
@@ -321,7 +377,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                     }
                                 }
                                 tbody {
-                                    for message in messages.iter() {
+                                    for message in messages_signal().iter() {
                                         tr { class: "hover:bg-gray-50",
                                             td { class: "border border-gray-300 px-4 py-2", "{message.uid}" }
                                             td { class: "border border-gray-300 px-4 py-2 text-left", "{message.subject}" }
@@ -337,13 +393,15 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
 
                 div { class: "flex flex-row gap-4",
                     button {
-                        class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed",
-                        onclick: move |_| on_back.call((session2.clone(), email.clone(), mailbox.clone())),
+                        class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed", 
+                        onclick: move |_| {
+                            on_back.call((session_signal().clone(), email.clone(), mailbox_signal().clone()));
+                        },
                         "Back to Home"
                     }
                     button {
                         class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed",
-                        disabled: loading(),
+                        disabled: !msg_fetch_done(),
                         onclick: move |_| {
                             group_by_sender.set(true);
                         },
@@ -351,11 +409,18 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                     }
                     button {
                         class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed",
-                        disabled: loading(),
+                        disabled: !msg_fetch_done() || generator_loading(),
                         onclick: move |_| {
-                            smart_grouping.set(true);
+                            group_by_category_callback.call(());
                         },
-                        "Smart Grouping"
+                        if true {
+                            div { class: "flex flex-row gap-2 items-center justify-center",
+                                p { class: "text-gray-600", "Loading Email Classifier..." }
+                                div { class: "w-4 h-4 border-t-2 border-b-2 border-gray-900 rounded-full animate-spin mx-2" }
+                            }
+                        } else {
+                            "Group by Category"
+                        }
                     }
                 }
             }
@@ -364,12 +429,27 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                 div { class: "bg-white p-8 rounded-2xl shadow-lg min-w-[350px] w-full m-10 text-center",
                     h1 { class: "text-2xl font-bold text-blue-700 mb-4", "Group by Sender" }
                     div { class: "flex flex-row gap-4 overflow-x-auto",
-                        for (sender, messages) in sorted_msg_by_sender {
+                        for (sender, messages) in sorted_msg_by_sender.iter().cloned() {
                             div { class: "bg-gray-100 p-4 rounded-lg flex flex-col gap-2",
-                                h2 { class: "text-lg font-bold text-blue-700 mb-2", "{sender}" }
-                                for message in messages.iter() {
-                                    div { class: "bg-gray-200 p-2 rounded-lg",
-                                        p { class: "text-gray-600", "{message.subject}" }
+                                style: "min-width: 600px;",
+                                h2 { class: "text-lg font-bold text-blue-700 mb-2", "{sender} ({messages.len()})" }
+                                button {
+                                    class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-400",
+                                    onclick: move |_| {
+                                        let session_clone = session_signal().clone();
+                                        let msg_uids = messages.iter().map(|m| m.uid).collect::<Vec<_>>();
+                                        tokio::task::spawn_blocking(move || {
+                                            let seq = msg_uids.iter().map(|uid| format!("{}", uid)).join(",");
+                                            session_clone.lock().unwrap().mv(seq, "Custodian/Trash").expect("Failed to move message to trash");
+                                        });
+                                    },
+                                    "🗑️"
+                                }
+                                div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
+                                    for message in messages.iter() {
+                                        div { class: "bg-gray-200 p-2 rounded-lg w-full",
+                                            p { class: "text-gray-600",  "[{message.uid}]" br {} b { "{message.subject}" } }
+                                        }
                                     }
                                 }
                             }
@@ -378,9 +458,39 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                 }
             }
 
-            if smart_grouping() {
+            if group_by_category_active() {
                 div { class: "bg-white p-8 rounded-2xl shadow-lg min-w-[350px] w-full m-10 text-center",
-                    h1 { class: "text-2xl font-bold text-blue-700 mb-4", "Smart Grouping" }
+                    h1 { class: "text-2xl font-bold text-blue-700 mb-4", "Group by Category" }
+                    h2 { class: "text-lg font-bold text-blue-700 mb-2", "Progress: {smart_progress()} / {local_msg_count}" }
+                    div { class: "flex flex-row gap-4 overflow-x-auto",
+                        for (category, messages) in sorted_msg_by_category.iter().cloned() {
+                            div { class: "bg-gray-100 p-4 rounded-lg flex flex-col gap-2",
+                                style: "min-width: 600px;",
+                                h2 { class: "text-lg font-bold text-blue-700 mb-2", "{category} ({messages.len()})" }
+                                button {
+                                    class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-400",
+                                    disabled: !smart_complete(),
+                                    onclick: move |_| {
+                                        let session_clone = session_signal().clone();
+                                        let msg_uids = messages.iter().map(|m| m.uid).collect::<Vec<_>>();
+                                        let ctgry = category.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let seq = msg_uids.iter().map(|uid| format!("{}", uid)).join(",");
+                                            session_clone.lock().unwrap().mv(seq, "Custodian/Trash").expect("Failed to move message to trash");
+                                        });
+                                    },
+                                    "🗑️"
+                                }
+                                div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
+                                    for message in messages.iter() {
+                                        div { class: "bg-gray-200 p-2 rounded-lg min-w-[200px]",
+                                            p { class: "text-gray-600",  "[{message.uid}]" br {} b {"{message.subject}"} }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

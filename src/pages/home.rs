@@ -31,10 +31,18 @@ pub fn HomePage(props: HomePageProps) -> Element {
     use_effect(move || {
         if let Ok(mut session_guard) = session_ptr.lock() {
             if let Ok(mailbox_list) = (&mut *session_guard).list(None, Some("*")) {
-                let mailbox_names: Vec<String> = mailbox_list
+                let mut mailbox_names: Vec<String> = mailbox_list
                     .iter()
                     .map(|mb| mb.name().to_string())
                     .collect::<Vec<String>>();
+                // create custodian folders if they don't exist
+                if !mailbox_names.contains(&"Custodian/Trash".to_string()) {
+                    if !mailbox_names.contains(&"Custodian".to_string())  {
+                        session_guard.create("Custodian").unwrap();
+                    }
+                    session_guard.create("Custodian/Trash").unwrap();
+                    mailbox_names.push("Custodian/Trash".to_string());
+                }
                 mailboxes.set(mailbox_names);
             }
         }
