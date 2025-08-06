@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+
 mod utils;
 mod pages;
 mod ai;
@@ -41,21 +42,68 @@ enum Page {
 
 fn app() -> Element {
     let mut page = use_signal(|| Page::Login);
+    let mut db_signal = use_signal(|| Option::<AsyncPtrProp<db::CustodianDB>>::None);
+    let mut db_loading = use_signal(|| true);
+    let mut db_error = use_signal(|| String::new());
+    
+    use_effect(move || {
+        match db::init_database().map(|db| AsyncPtrProp::new(db)) {
+            Ok(db_prop) => db_signal.set(Some(db_prop)),
+            Err(e) => db_error.set(e.to_string()),
+        }
+        db_loading.set(false);
+    });
+
+    if db_signal().is_none() {
+        return rsx! {
+            document::Title { "Custodian" }
+            document::Stylesheet { href: asset!("/assets/output.css") }
+            if db_loading() {
+                div { "Loading database..." }
+            } else {
+                div { "Failed to initialize database: {db_error()}" }
+            }
+        };
+    }
 
     match page() {
         Page::Login => rsx! {
             document::Title { "Custodian" }
             document::Stylesheet { href: asset!("/assets/output.css") }
-            LoginPage { on_login: move |(server, port, email, password)| {
-                page.set(Page::AuthPage {
-                    password,
-                    connection: ConnectionInfo {
-                        server,
-                        port,
-                        email,
-                    },
-                });
-            }}
+            LoginPage { 
+                db: db_signal().unwrap(),
+                on_login: {
+                    let db = db_signal().unwrap();
+                    move |(server, port, email, password, save_credentials): (String, String, String, String, bool)| {
+                        // Save credentials if requested
+                        if save_credentials {
+                            let credentials = db::models::Credentials {
+                                id: None,
+                                email: email.clone(),
+                                server: server.clone(),
+                                port: port.clone(),
+                                password: password.clone(),
+                                name: None,
+                                created_at: chrono::Utc::now(),
+                                updated_at: chrono::Utc::now(),
+                            };
+
+                            if let Err(e) = db.lock().unwrap().create_credentials(credentials) {
+                                eprintln!("Failed to save credentials: {}", e);
+                            }
+                        }
+                        
+                        page.set(Page::AuthPage {
+                            password,
+                            connection: ConnectionInfo {
+                                server,
+                                port,
+                                email,
+                            },
+                        });
+                    }
+                }
+            }
         },
         Page::AuthPage { connection, password } => rsx! {
             document::Title { "Authentication" }

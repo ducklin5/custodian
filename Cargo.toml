@@ -39,6 +39,11 @@ burn-wgpu = "0.18.0"
 wgpu = "0.19"
 pollster = "0.4.0"
 md5 = "0.7"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+polodb = "5.1.4"
+polodb_core = "5.1.4"
+directories = "6.0.0"
 
 [profile]
 

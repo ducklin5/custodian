@@ -413,10 +413,14 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                         onclick: move |_| {
                             group_by_category_callback.call(());
                         },
-                        if true {
+                        if generator_loading() {
                             div { class: "flex flex-row gap-2 items-center justify-center",
                                 p { class: "text-gray-600", "Loading Email Classifier..." }
-                                div { class: "w-4 h-4 border-t-2 border-b-2 border-gray-900 rounded-full animate-spin mx-2" }
+                                // Improved spinner with a colored border and smoother animation
+                                div {
+                                    class: "w-6 h-6 border-4 border-blue-400 border-t-transparent rounded-full animate-spin mx-2",
+                                    style: "border-top-color: transparent; border-right-color: #3b82f6; border-bottom-color: #3b82f6; border-left-color: #3b82f6;"
+                                }
                             }
                         } else {
                             "Group by Category"
@@ -440,7 +444,9 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                         let msg_uids = messages.iter().map(|m| m.uid).collect::<Vec<_>>();
                                         tokio::task::spawn_blocking(move || {
                                             let seq = msg_uids.iter().map(|uid| format!("{}", uid)).join(",");
-                                            session_clone.lock().unwrap().mv(seq, "Custodian/Trash").expect("Failed to move message to trash");
+                                            println!("Moving messages ({seq}) to Custodian/Trash");
+                                            session_clone.lock().unwrap().mv(&seq, "Custodian/Trash").expect("Failed to move message to trash");
+                                            println!("Moved messages ({seq}) to Custodian/Trash");
                                         });
                                     },
                                     "🗑️"
@@ -468,7 +474,11 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                 style: "min-width: 600px;",
                                 h2 { class: "text-lg font-bold text-blue-700 mb-2", "{category} ({messages.len()})" }
                                 button {
-                                    class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-400",
+                                    class: r#"w-full py-3 rounded-lg font-bold text-lg transition-colors 
+                                        duration-200 bg-gray-300 text-gray-800 
+                                        enabled:hover:bg-gray-400
+                                        disabled:bg-gray-200 disabled:text-gray-400 
+                                        disabled:opacity-50 disabled:cursor-not-allowed"#,
                                     disabled: !smart_complete(),
                                     onclick: move |_| {
                                         let session_clone = session_signal().clone();

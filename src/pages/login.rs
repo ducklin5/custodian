@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+use crate::db::{CustodianDB, models::Credentials};
+use crate::utils::AsyncPtrProp;
 
 #[derive(PartialEq, Clone)]
 pub enum ImapServer {
@@ -9,12 +11,45 @@ pub enum ImapServer {
 }
 
 #[component]
-pub fn LoginPage(on_login: EventHandler<(String, String, String, String)>) -> Element {
+pub fn LoginPage(
+    db: AsyncPtrProp<CustodianDB>,
+    on_login: EventHandler<(String, String, String, String, bool)>
+) -> Element {
     let mut server = use_signal(|| ImapServer::Gmail);
     let mut custom_server = use_signal(|| String::new());
     let mut custom_port = use_signal(|| String::from("993"));
     let mut email = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
+    let mut save_credentials = use_signal(|| false);
+    let mut saved_credentials = use_signal(Vec::<Credentials>::new);
+    let mut selected_profile = use_signal(|| String::new());
+
+    // Load saved credentials on mount
+    use_effect(move || {
+        if let Ok(creds) = db.lock().unwrap().get_all_credentials() {
+            saved_credentials.set(creds);
+        }
+    });
+
+    // Function to select a saved credential
+    let mut select_credential = move |cred: Credentials| {
+        email.set(cred.email.clone());
+        
+        // Set server based on the saved server
+        match cred.server.as_str() {
+            "imap.gmail.com" => server.set(ImapServer::Gmail),
+            "imap.mail.yahoo.com" => server.set(ImapServer::Yahoo),
+            "imap-mail.outlook.com" => server.set(ImapServer::Outlook),
+            _ => {
+                server.set(ImapServer::Custom);
+                custom_server.set(cred.server.clone());
+                custom_port.set(cred.port.clone());
+            }
+        }
+        
+        password.set(cred.password.clone());
+        selected_profile.set(cred.email.clone());
+    };
 
     let (server_addr, port) = match server() {
         ImapServer::Gmail => (String::from("imap.gmail.com"), String::from("993")),
@@ -89,10 +124,39 @@ pub fn LoginPage(on_login: EventHandler<(String, String, String, String)>) -> El
     } else {
         None
     };
+
     rsx! {
         div { class: "min-h-screen flex items-center justify-center bg-slate-100",
             div { class: "bg-white p-8 rounded-2xl shadow-lg min-w-[350px] w-full max-w-md",
                 h1 { class: "text-2xl font-bold text-center mb-6 text-blue-700", "Custodian" }
+                // Profiles selection
+                div { class: "mb-4",
+                    label { class: "block font-semibold mb-1", "Profiles:" }
+                    select {
+                        class: "w-full rounded-lg px-3 py-2 border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-400",
+                        value: selected_profile,
+                        onchange: move |e| {
+                            let selected_email = e.value();
+                            if !selected_email.is_empty() && selected_email != "select_profile" && selected_email != "no_profiles" {
+                                if let Some(cred) = saved_credentials().iter().find(|c| c.email == selected_email) {
+                                    select_credential(cred.clone());
+                                }
+                            }
+                        },
+                        if saved_credentials().is_empty() {
+                            option { value: "no_profiles", selected: true, "No profiles available" }
+                        } else {
+                            option { value: "select_profile", selected: selected_profile().is_empty(), "Select a profile" }
+                            for cred in saved_credentials() {
+                                option { 
+                                    value: "{cred.email}", 
+                                    selected: selected_profile() == cred.email,
+                                    "{cred.email}" 
+                                }
+                            }
+                        }
+                    }
+                }
                 // Server selection
                 div { class: "mb-4",
                     label { class: "block font-semibold mb-1", "IMAP Server:" }
@@ -134,7 +198,7 @@ pub fn LoginPage(on_login: EventHandler<(String, String, String, String)>) -> El
                     }
                 }
                 // Password input
-                div { class: "mb-6",
+                div { class: "mb-4",
                     label { class: "block font-semibold mb-1", "Password:" }
                     input {
                         class: "w-full rounded-lg px-3 py-2 border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-400",
@@ -144,11 +208,23 @@ pub fn LoginPage(on_login: EventHandler<(String, String, String, String)>) -> El
                         placeholder: "Password"
                     }
                 }
+                // Save credentials checkbox
+                div { class: "mb-6",
+                    label { class: "flex items-center cursor-pointer",
+                        input {
+                            class: "mr-2 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded",
+                            r#type: "checkbox",
+                            checked: save_credentials,
+                            onchange: move |e| save_credentials.set(e.checked()),
+                        }
+                        span { class: "text-sm text-gray-700", "Save credentials for future logins" }
+                    }
+                }
                 // Login & Analyze button
                 button {
                     class: "w-full py-3 bg-blue-700 text-white rounded-lg font-bold text-lg hover:bg-blue-800 transition-colors duration-200",
                     onclick: move |_| {
-                        on_login.call((server_addr.clone(), port.clone(), email().clone(), password().clone()));
+                        on_login.call((server_addr.clone(), port.clone(), email().clone(), password().clone(), save_credentials()));
                     },
                     "Login & Analyze"
                 }

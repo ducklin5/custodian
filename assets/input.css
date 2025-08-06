@@ -1,9 +1,10 @@
 @import "tailwindcss";
+@source inline("animate-spin");
 
 #main {
-  --color1: #aaa;  
+  --color1: #aaa;
   --color2: #333;
-  --rows:  10;
+  --rows: 10;
   --cols: 10;
   --gradient: linear-gradient(to top left, var(--color2) 25.1%, transparent 0, transparent 74.9%, var(--color2) 0);
 
