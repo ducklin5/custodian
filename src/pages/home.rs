@@ -76,7 +76,9 @@ pub fn HomePage(props: HomePageProps) -> Element {
                     class: "mt-6 w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200",
                     onclick: move |_| {
                         on_logout.call(());
-                        session_ptr2.lock().unwrap().logout().unwrap();
+                        session_ptr2.lock().unwrap().logout().unwrap_or_else(|e| {
+                            eprintln!("Error logging out: {}", e);
+                        });
                     },
                     "Logout"
                 }

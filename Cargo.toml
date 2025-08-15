@@ -27,6 +27,7 @@ tokenizers = "0.21.2"
 anyhow = "1.0"
 tracing-subscriber = "0.3.19"
 serde_json = "1.0.141"
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
 burn = { version = "0.18", features = ["wgpu", "autodiff"] }
 ndarray = { version = "0.16.1", features = ["rayon"] }
 num-traits = "0.2.19"

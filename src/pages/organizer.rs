@@ -5,12 +5,49 @@ use burn::backend::wgpu::WgpuDevice;
 use itertools::Itertools;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use crate::utils::AsyncPtrProp;
-use crate::ai::models::llama::HFLlama;
-use crate::ai::prompts::email_classification_prompt;
+use crate::ai::models::llama::{BurnLlama, CppLlama, TextGenerator};
+use crate::ai::prompts::email_classification_with_body_prompt;
+use crate::utils::{
+    AsyncPtrProp,
+    organizer::{MessageInfo, fetch_messages, move_messages_to_trash},
+    progress::{UiProgress, UiProgressSignal},
+};
 
-const FETCH_BATCH_SIZE: u32 = 200;
+fn sanitize_label(raw: &str) -> String {
+    // Remove anything after an XML-like opener
+    let head = raw.split('<').next().unwrap_or("");
+    // Explicitly strip common trailing tags if they slipped through
+    let head = head
+        .trim_end_matches("</output>")
+        .trim_end_matches("/output>");
+    // Clean up quotes, stray punctuation, and whitespace
+    let cleaned = head
+        .trim()
+        .trim_matches(['"', '\'', '.', ';', ':', ' ', '\t', '\n', '\r'].as_ref());
+    // Enforce single-token alphabetic labels and title-case them
+    let token = cleaned.split_whitespace().next().unwrap_or("");
+    let token = token.trim_matches(|c: char| !c.is_alphabetic());
+    if token.is_empty() {
+        return String::new();
+    }
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase()),
+        None => String::new(),
+    }
+}
+
+fn is_valid_label(label: &str) -> bool {
+    if label.len() < 3 || label.len() > 20 {
+        return false;
+    }
+    if !label.chars().all(|c| c.is_alphabetic()) {
+        return false;
+    }
+    true
+}
 
 #[derive(Clone, Props, PartialEq)]
 pub struct OrganizerPageProps {
@@ -22,178 +59,6 @@ pub struct OrganizerPageProps {
         String,
         String,
     )>,
-}
-
-#[derive(Clone, Debug)]
-struct MessageInfo {
-    uid: u32,
-    subject: String,
-    date: String,
-    sender: String,
-    sender_name: String,
-    body_text: String,
-}
-
-// Function to fetch messages from IMAP server
-fn fetch_messages(
-    session: AsyncPtrProp<imap::Session<native_tls::TlsStream<std::net::TcpStream>>>,
-    mailbox: String,
-    mut server_msg_count: Signal<u32, SyncStorage>,
-    mut msg_signal: Signal<Vec<MessageInfo>, SyncStorage>,
-    with_body: bool,
-) -> Result<Vec<MessageInfo>, String> {
-    if let Ok(mut session_guard) = session.lock() {
-        // First, select the mailbox
-        println!("Selecting mailbox: {}", mailbox);
-        if let Err(e) = (&mut *session_guard).select(&mailbox) {
-            return Err(format!("Failed to select mailbox: {}", e));
-        }
-
-        // Now check the mailbox status after selection
-        println!("Checking mailbox status...");
-        match (&mut *session_guard).status(&mailbox, "(MESSAGES UIDNEXT UIDVALIDITY)") {
-            Ok(status) => {
-                println!("Mailbox status: {:?}", status);
-                if status.exists == 0 {
-                    println!(
-                        "Warning: Mailbox shows 0 messages, but this might be due to Yahoo's limited view mode"
-                    );
-                }
-            }
-            Err(e) => {
-                println!("Warning: Failed to get mailbox status: {}", e);
-            }
-        };
-
-        // Try to get all UIDs - this might be limited by Yahoo's view mode
-        println!("Searching for all UIDs...");
-        let uid_vec = match (&mut *session_guard).uid_search("1:*") {
-            Ok(uids) => {
-                let uid_list: Vec<u32> = uids.into_iter().collect();
-                println!("Found {} UIDs", uid_list.len());
-                server_msg_count.set(uid_list.len() as u32);
-                if uid_list.is_empty() {
-                    println!("No UIDs found - trying alternative approach...");
-                    // Try a different approach for Yahoo's limited view
-                    match (&mut *session_guard).uid_search("ALL") {
-                        Ok(alt_uids) => {
-                            let alt_list: Vec<u32> = alt_uids.into_iter().collect();
-                            println!("Alternative search found {} UIDs", alt_list.len());
-                            server_msg_count.set(alt_list.len() as u32);
-                            alt_list
-                        }
-                        Err(e) => {
-                            return Err(format!("Failed to find any UIDs: {}", e));
-                        }
-                    }
-                } else {
-                    uid_list
-                }
-            }
-            Err(e) => {
-                return Err(format!("Failed to search for UIDs: {}", e));
-            }
-        };
-
-        // Fetch messages with pagination
-        let mut all_message_infos: Vec<MessageInfo> = Vec::new();
-
-        for batch in uid_vec.chunks(FETCH_BATCH_SIZE as usize) {
-            let sequence_set = batch.iter().map(|uid| format!("{}", uid)).join(",");
-            println!("Fetching UID batch: {}...", sequence_set);
-
-            let fetch_str = if with_body {
-                "(ENVELOPE BODY[TEXT])"
-            } else {
-                "ENVELOPE"
-            };
-            let messages = match (&mut *session_guard).uid_fetch(&sequence_set, fetch_str) {
-                Ok(messages) => messages,
-                Err(e) => {
-                    return Err(format!("Failed to fetch messages: {}", e));
-                }
-            };
-
-            for message in messages.iter() {
-                let uid = message.uid.unwrap_or(0);
-                if uid == 0 {
-                    return Err(format!("Invalid UID: {}", uid));
-                }
-
-                // Extract subject from envelope
-                let subject = message
-                    .envelope()
-                    .and_then(|env| env.subject.as_ref())
-                    .map(|subj| {
-                        // Decode RFC 2047 encoded words (like =?UTF-8?Q?...?=)
-                        let subject_str = String::from_utf8_lossy(subj);
-                        match rfc2047_decoder::decode(subject_str.as_bytes()) {
-                            Ok(decoded) => decoded,
-                            Err(_) => subject_str.to_string(), // Fallback to original if decoding fails
-                        }
-                    })
-                    .unwrap_or_else(|| "No Subject".to_string());
-
-                // Extract date from envelope
-                let date = message
-                    .envelope()
-                    .and_then(|env| env.date.as_ref())
-                    .map(|date| String::from_utf8_lossy(date).to_string())
-                    .unwrap_or_else(|| "No Date".to_string());
-
-                let (sender, sender_name) = message
-                    .envelope()
-                    .and_then(|env| env.from.as_ref())
-                    .and_then(|from| from.first())
-                    .map(|addr| {
-                        let name = addr
-                            .name
-                            .map(|n| String::from_utf8_lossy(n))
-                            .unwrap_or("Unknown".into());
-                        let mailbox = addr
-                            .mailbox
-                            .map(|m| String::from_utf8_lossy(m))
-                            .unwrap_or_default();
-                        let host = addr
-                            .host
-                            .map(|h| String::from_utf8_lossy(h))
-                            .unwrap_or_default();
-
-                        // Use display name if available, otherwise use email address
-                        (
-                            format!("{}@{}", mailbox, host)
-                                .to_lowercase()
-                                .trim()
-                                .to_string(),
-                            name.into(),
-                        )
-                    })
-                    .unwrap_or(("Unknown".to_string(), "Unknown".to_string()));
-
-                let body_text = message.text()
-                    .map(|t| String::from_utf8_lossy(t).to_string())
-                    .unwrap_or("No Body".to_string());
-
-                all_message_infos.push(MessageInfo {
-                    uid,
-                    subject,
-                    date,
-                    sender,
-                    sender_name,
-                    body_text,
-                });
-            }
-            if let Ok(mut msg_signal_guard) = msg_signal.try_write() {
-                *msg_signal_guard = all_message_infos.clone();
-            }
-        }
-
-        // Sort by UID (newest first)
-        all_message_infos.sort_by(|a, b| b.uid.cmp(&a.uid));
-        Ok(all_message_infos)
-    } else {
-        Err("Failed to lock session".to_string())
-    }
 }
 
 #[component]
@@ -209,28 +74,43 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
     let mut error = use_signal(|| Option::<String>::None);
     let mut messages_signal = use_signal_sync(|| Vec::<MessageInfo>::new());
     let server_msg_count = use_signal_sync(|| 0);
-    let mut smart_progress = use_signal_sync(|| 0);
-    let mut smart_complete = use_signal_sync(|| false);
     let session_signal = use_signal_sync(|| session.clone());
     let mailbox_signal = use_signal_sync(|| mailbox.clone());
     let mut group_by_sender = use_signal(|| false);
     let mut group_by_category_active = use_signal(|| false);
+    let mut selected_uid = use_signal_sync(|| Option::<u32>::None);
+
+    let mut message_elements = use_signal(|| HashMap::<u32, Rc<MountedData>>::new());
+
+    let model_progress = use_signal_sync(|| UiProgress::new("Loading Cached", 4));
+
+    // Performance tracking
+    let mut processing_start_time = use_signal_sync(|| Option::<std::time::Instant>::None);
+    let smart_progress = use_signal_sync(|| 0);
+    let smart_complete = use_signal_sync(|| false);
 
     let mut messages_by_sender = use_signal_sync(|| HashMap::<String, Vec<MessageInfo>>::new());
     let messages_by_category = use_signal_sync(|| HashMap::<String, Vec<MessageInfo>>::new());
-    
+
     // Generator loading state
     let mut generator_loading = use_signal(|| true);
-    let mut generator = use_signal_sync(|| Option::<AsyncPtrProp<HFLlama>>::None);
-
+    let mut generator =
+        use_signal_sync(|| Option::<AsyncPtrProp<Box<dyn TextGenerator + Send>>>::None);
 
     // Fetch messages when component mounts
     use_effect(move || {
         spawn(async move {
-            let result =
-                tokio::task::spawn_blocking(move || fetch_messages(session_signal().clone(), mailbox_signal(), server_msg_count.clone(), messages_signal.clone(), false))
-                    .await
-                    .unwrap();
+            let result = tokio::task::spawn_blocking(move || {
+                fetch_messages(
+                    session_signal().clone(),
+                    mailbox_signal(),
+                    server_msg_count.clone(),
+                    messages_signal.clone(),
+                    false,
+                )
+            })
+            .await
+            .unwrap();
             match result {
                 Ok(msg_infos) => {
                     messages_signal.set(msg_infos);
@@ -243,82 +123,135 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
         });
     });
 
-    
     // Initialize model in use_effect
     use_effect(move || {
         spawn(async move {
             let device = WgpuDevice::default();
-            let model_id = "HuggingFaceTB/SmolLM2-135M";
-            let revision = "main";
-            
-            println!("Loading model for generate test...");
-            let result = tokio::task::spawn_blocking(move || {
-                let mut model = HFLlama::new(model_id, revision, device).expect("Failed to load Llama model");
-                model.add_terminator("<|end:categories|>");
-                model.add_terminator("<");
-                model.add_terminator("\n");
-                model.add_terminator("Task");
-                AsyncPtrProp::new(model)
-            }).await;
-            
-            match result {
-                Ok(model) => {
+            let model_progress = UiProgressSignal(model_progress.clone());
+
+            println!("Loading optimized model for email classification...");
+            let join_result = tokio::task::spawn_blocking(
+                move || -> anyhow::Result<AsyncPtrProp<Box<dyn TextGenerator + Send>>> {
+                    let mut model: Box<dyn TextGenerator + Send> =
+                        if std::env::var("USE_BURN").is_ok() {
+                            let model_id = "HuggingFaceTB/SmolLM2-135M";
+                            let revision = "main";
+                            let model = BurnLlama::new(model_id, revision, device, model_progress)?;
+                            Box::new(model)
+                        } else {
+                            let model_id = "unsloth/gemma-3-1b-it-GGUF:BF16";
+                            let revision = "main";
+                            let model = CppLlama::new(model_id, revision, model_progress)?;
+                            Box::new(model)
+                        };
+                    model.add_terminator("\n");
+                    model.add_terminator("<");
+                    model.add_terminator("</output>");
+                    Ok(AsyncPtrProp::new(model))
+                },
+            )
+            .await;
+
+            match join_result {
+                Ok(Ok(model)) => {
                     generator.set(Some(model));
+                    generator_loading.set(false);
+                    println!("Optimized email classification model loaded successfully!");
+                }
+                Ok(Err(e)) => {
+                    println!("Failed to load model: {:?}", e);
                     generator_loading.set(false);
                 }
                 Err(e) => {
-                    println!("Failed to load model: {:?}", e);
+                    println!("Failed to spawn blocking task: {:?}", e);
                     generator_loading.set(false);
                 }
             }
         });
     });
 
-    use_effect(move || {
-        if group_by_sender() {
-            let map: HashMap<String, Vec<MessageInfo>> = messages_signal
-                .read()
-                .iter()
-                .into_grouping_map_by(|m| m.sender.clone())
-                .aggregate(|acc, _key, msg| {
-                    let mut group = acc.unwrap_or(vec![]);
-                    group.push(msg.clone());
-                    Some(group)
-                });
-            messages_by_sender.set(map);
-        }
+    // Group by sender callback
+    let group_by_sender_callback = use_callback(move |_| {
+        let map: HashMap<String, Vec<MessageInfo>> = messages_signal
+            .read()
+            .iter()
+            .into_grouping_map_by(|m| m.sender.clone())
+            .aggregate(|acc, _key, msg| {
+                let mut group = acc.unwrap_or(vec![]);
+                group.push(msg.clone());
+                Some(group)
+            });
+        messages_by_sender.set(map);
+        group_by_sender.set(true);
     });
 
+    // Group by category callback
     let group_by_category_callback = use_callback(move |_| {
-        if !generator_loading() && generator().is_some() {
+        if !generator_loading() && generator.read().is_some() {
             group_by_category_active.set(true);
             let messages_clone = messages_signal.clone();
             let mut messages_by_category_clone = messages_by_category.clone();
             let generator_clone = generator.clone();
-            let _result = tokio::task::spawn_blocking(move || {
-                let mut progress = 0;
-                for msg in messages_clone.read().iter() {
-                    let mut groups = messages_by_category_clone.write();
-                    let top_5_categories = groups.iter().sorted_by(|a, b| b.1.len().cmp(&a.1.len())).take(5).map(|k| k.0.clone()).collect::<Vec<_>>();
-                    let prompt = email_classification_prompt(top_5_categories, &msg.subject, &msg.sender);
-                    if let Some(model) = generator_clone() {
-                        let result = model.lock().unwrap().generate(prompt, None, None).unwrap_or("Err".into());
-                        let labels = result
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .unique()
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>();
-                        println!("Labels: {:?}", labels);
-                        for label in labels {
-                            groups.entry(label).or_insert(Vec::new()).push(msg.clone());
+            let mut smart_progress_clone = smart_progress.clone();
+            let mut smart_complete_clone = smart_complete.clone();
+
+            processing_start_time.set(Some(std::time::Instant::now()));
+
+            spawn(async move {
+                let _result = tokio::task::spawn_blocking(move || {
+                    let mut progress = 0;
+                    let opt_model = generator_clone.read().clone();
+                    if let Some(model_ptr) = opt_model {
+                        let mut model_box = model_ptr.lock().unwrap();
+                        for msg in messages_clone.read().iter() {
+                            let mut groups = messages_by_category_clone.write();
+                            let top_10_categories = groups
+                                .iter()
+                                .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
+                                .take(10)
+                                .map(|k| k.0.clone())
+                                .collect::<Vec<_>>();
+
+                            let body_text = match crate::utils::organizer::fetch_message_body(
+                                session_signal().clone(),
+                                &mailbox_signal(),
+                                msg.uid,
+                            ) {
+                                Ok(b) => b,
+                                Err(_) => String::new(),
+                            };
+                            let prompt = email_classification_with_body_prompt(
+                                top_10_categories,
+                                &msg.subject,
+                                &msg.sender,
+                                &body_text,
+                            );
+                            let result = model_box
+                                .as_mut()
+                                .generate(prompt, None, None)
+                                .unwrap_or("Err".into());
+                            let mut labels = result
+                                .split(|c| c == ',' || c == '\n' || c == ';' || c == '|')
+                                .map(|s| sanitize_label(s))
+                                .filter(|s| is_valid_label(s))
+                                .take(3)
+                                .unique()
+                                .collect::<Vec<_>>();
+                            if labels.is_empty() {
+                                labels.push("Uncategorized".to_string());
+                            }
+                            println!("Labels: {:?}", labels);
+                            for label in labels {
+                                groups.entry(label).or_insert(Vec::new()).push(msg.clone());
+                            }
+                            progress += 1;
+                            *smart_progress_clone.write() = progress;
+                            std::thread::sleep(std::time::Duration::from_millis(10));
                         }
                     }
-                    progress += 1;
-                    *smart_progress.write() = progress;
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                *smart_complete.write() = true;
+                    *smart_complete_clone.write() = true;
+                })
+                .await;
             });
         }
     });
@@ -327,13 +260,12 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
     let sorted_msg_by_sender = {
         let msg_by_sender = messages_by_sender.read();
         msg_by_sender
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
-        .collect::<Vec<_>>()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
+            .collect::<Vec<_>>()
     };
 
-    
     let sorted_msg_by_category = {
         let msg_by_category = messages_by_category.read();
         msg_by_category
@@ -341,6 +273,38 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
             .map(|(k, v)| (k.clone(), v.clone()))
             .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
             .collect::<Vec<_>>()
+    };
+
+    let current_model_progress = model_progress.read();
+
+    // Compute performance stats outside RSX
+    let (performance_info, progress_info) = if group_by_category_active() && !smart_complete() {
+        let processed = smart_progress();
+        let stats_str = format!("Processed: {}", processed);
+
+        let rate_info = if let Some(start_time) = processing_start_time() {
+            if let Some(elapsed) = std::time::Instant::now().checked_duration_since(start_time) {
+                if elapsed.as_secs() > 0 {
+                    let rate = smart_progress() as f64 / elapsed.as_secs() as f64;
+                    let eta = if rate > 0.0 {
+                        ((local_msg_count - smart_progress()) as f64 / rate).round() as u64
+                    } else {
+                        0
+                    };
+                    Some(format!("Rate: {:.1} emails/sec | ETA: {}s", rate, eta))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        (Some(stats_str), rate_info)
+    } else {
+        (None, None)
     };
 
     rsx! {
@@ -374,15 +338,41 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                         th { class: "border-3 border-black px-4 py-2 text-left ", "Subject" }
                                         th { class: "border-3 border-black px-4 py-2 text-left ", "Sender" }
                                         th { class: "border-3 border-black px-4 py-2 text-left ", "Date" }
+                                        th { class: "border-3 border-black px-4 py-2 text-left ", "Actions" }
                                     }
                                 }
                                 tbody {
-                                    for message in messages_signal().iter() {
-                                        tr { class: "hover:bg-gray-50",
+                                    for message in messages_signal() {
+                                        tr { 
+                                            id: "row-{message.uid}", 
+                                            class: "hover:bg-gray-50 cursor-pointer",
+                                            class: if selected_uid() == Some(message.uid) { "bg-yellow-100" },
+                                            onclick: move |_| selected_uid.set(Some(message.uid)),
+                                            onmounted: move |ctx| {
+                                                message_elements.write().insert(message.uid, ctx.data());
+                                            },
                                             td { class: "border border-gray-300 px-4 py-2", "{message.uid}" }
                                             td { class: "border border-gray-300 px-4 py-2 text-left", "{message.subject}" }
                                             td { class: "border border-gray-300 px-4 py-2", "[{message.sender}] {message.sender_name}" }
                                             td { class: "border border-gray-300 px-4 py-2", "{message.date}" }
+                                            td { class: "border border-gray-300 px-4 py-2",
+                                                button {
+                                                    class: "px-3 py-1 bg-gray-300 text-gray-800 rounded-lg font-bold hover:bg-gray-400 transition-colors duration-200",
+                                                    onclick: move |_| {
+                                                        let session_clone = session_signal().clone();
+                                                        let uid = message.uid;
+                                                        match move_messages_to_trash(session_clone, mailbox_signal(), vec![uid]) {
+                                                            Ok(uids) => {
+                                                                messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
+                                                            }
+                                                            Err(e) => {
+                                                                println!("Failed to move message: {}", e);
+                                                            }
+                                                        }
+                                                    },
+                                                    "🗑️"
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -393,7 +383,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
 
                 div { class: "flex flex-row gap-4",
                     button {
-                        class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed", 
+                        class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed",
                         onclick: move |_| {
                             on_back.call((session_signal().clone(), email.clone(), mailbox_signal().clone()));
                         },
@@ -403,7 +393,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                         class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg hover:bg-gray-400 transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed",
                         disabled: !msg_fetch_done(),
                         onclick: move |_| {
-                            group_by_sender.set(true);
+                            group_by_sender_callback.call(());
                         },
                         "Group by Sender"
                     }
@@ -414,13 +404,15 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                             group_by_category_callback.call(());
                         },
                         if generator_loading() {
-                            div { class: "flex flex-row gap-2 items-center justify-center",
+                            div { class: "flex flex-col gap-2 items-center justify-center",
                                 p { class: "text-gray-600", "Loading Email Classifier..." }
                                 // Improved spinner with a colored border and smoother animation
                                 div {
-                                    class: "w-6 h-6 border-4 border-blue-400 border-t-transparent rounded-full animate-spin mx-2",
+                                    class: "min-w-6 min-h-6 max-w-6 max-h-6 border-4 border-blue-400 border-t-transparent rounded-full animate-spin mx-2",
                                     style: "border-top-color: transparent; border-right-color: #3b82f6; border-bottom-color: #3b82f6; border-left-color: #3b82f6;"
                                 }
+                                div { class: "text-gray-600", "Stage: {current_model_progress.stage} ({current_model_progress.stages_done} / {current_model_progress.stages_total})" }
+                                div { class: "text-gray-600", "Progress: {current_model_progress.progress} / {current_model_progress.total}" }
                             }
                         } else {
                             "Group by Category"
@@ -434,27 +426,47 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                     h1 { class: "text-2xl font-bold text-blue-700 mb-4", "Group by Sender" }
                     div { class: "flex flex-row gap-4 overflow-x-auto",
                         for (sender, messages) in sorted_msg_by_sender.iter().cloned() {
-                            div { class: "bg-gray-100 p-4 rounded-lg flex flex-col gap-2",
+                                        div { class: "bg-gray-100 p-4 rounded-lg flex flex-col gap-2",
                                 style: "min-width: 600px;",
                                 h2 { class: "text-lg font-bold text-blue-700 mb-2", "{sender} ({messages.len()})" }
                                 button {
                                     class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-400",
                                     onclick: move |_| {
                                         let session_clone = session_signal().clone();
-                                        let msg_uids = messages.iter().map(|m| m.uid).collect::<Vec<_>>();
-                                        tokio::task::spawn_blocking(move || {
-                                            let seq = msg_uids.iter().map(|uid| format!("{}", uid)).join(",");
-                                            println!("Moving messages ({seq}) to Custodian/Trash");
-                                            session_clone.lock().unwrap().mv(&seq, "Custodian/Trash").expect("Failed to move message to trash");
-                                            println!("Moved messages ({seq}) to Custodian/Trash");
-                                        });
+                                        let msg_uids = messages.clone().iter().map(|m| m.uid).collect::<Vec<_>>();
+                                        if let Ok(uids) = move_messages_to_trash(session_clone, mailbox_signal(), msg_uids.clone()) {
+                                            messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
+                                        } else {
+                                            println!("Failed to move messages");
+                                        }
                                     },
                                     "🗑️"
                                 }
                                 div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
-                                    for message in messages.iter() {
-                                        div { class: "bg-gray-200 p-2 rounded-lg w-full",
-                                            p { class: "text-gray-600",  "[{message.uid}]" br {} b { "{message.subject}" } }
+                                    for message in messages.clone() {
+                                        div { 
+                                            class: "bg-gray-200 p-2 rounded-lg w-full cursor-pointer ",
+                                            class: if selected_uid() == Some(message.uid) { "bg-yellow-100" },
+                                            onclick: move |_| async move {
+                                                selected_uid.set(Some(message.uid));
+                                                println!("Selected uid: {}", message.uid);
+                                                if let Some(el) = message_elements().get(&message.uid) {
+                                                    println!("Scrolling to row-{}", message.uid);
+                                                     let _ = el.scroll_to(ScrollBehavior::Smooth).await;
+                                                }
+                                            },
+                                            div { class: "text-gray-600 flex flex-col gap-1",
+                                                div { class: "flex flex-row gap-2 items-center justify-center",
+                                                    "[{message.uid}]"
+                                                    if messages_signal().iter().find(|m| m.uid == message.uid).is_some() {
+                                                        div { class: "w-5 h-5 bg-green-500 rounded-full", style: "margin-right: 4px;" }
+                                                    } else {
+                                                        div { class: "w-5 h-5 bg-red-500 rounded-full", style: "margin-right: 4px;" }
+                                                    }
+                                                }
+                                                b { "{message.subject}" }
+                                                span { "{message.sender}" }
+                                            }
                                         }
                                     }
                                 }
@@ -467,14 +479,38 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
             if group_by_category_active() {
                 div { class: "bg-white p-8 rounded-2xl shadow-lg min-w-[350px] w-full m-10 text-center",
                     h1 { class: "text-2xl font-bold text-blue-700 mb-4", "Group by Category" }
-                    h2 { class: "text-lg font-bold text-blue-700 mb-2", "Progress: {smart_progress()} / {local_msg_count}" }
+
+                    if !smart_complete() {
+                        div { class: "mb-4 p-4 bg-blue-50 rounded-lg",
+                            h2 { class: "text-lg font-bold text-blue-700 mb-2", "Processing: {smart_progress()} / {local_msg_count}" }
+
+                            // Progress bar
+                            div { class: "w-full bg-gray-200 rounded-full h-2.5 mb-2",
+                                div {
+                                    class: "bg-blue-600 h-2.5 rounded-full transition-all duration-300",
+                                    style: "width: {(smart_progress() as f32 / local_msg_count as f32 * 100.0).min(100.0)}%"
+                                }
+                            }
+
+                            // Performance stats
+                            if let Some(stats) = &performance_info {
+                                div { class: "text-sm text-gray-600 mt-2",
+                                    p { "{stats}" }
+                                    if let Some(rate_info) = &progress_info {
+                                        p { "{rate_info}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     div { class: "flex flex-row gap-4 overflow-x-auto",
                         for (category, messages) in sorted_msg_by_category.iter().cloned() {
                             div { class: "bg-gray-100 p-4 rounded-lg flex flex-col gap-2",
                                 style: "min-width: 600px;",
                                 h2 { class: "text-lg font-bold text-blue-700 mb-2", "{category} ({messages.len()})" }
                                 button {
-                                    class: r#"w-full py-3 rounded-lg font-bold text-lg transition-colors 
+                                    class: r#"w-full py-3 rounded-lg font-bold text-lg transition-colors
                                         duration-200 bg-gray-300 text-gray-800 
                                         enabled:hover:bg-gray-400
                                         disabled:bg-gray-200 disabled:text-gray-400 
@@ -482,19 +518,36 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                     disabled: !smart_complete(),
                                     onclick: move |_| {
                                         let session_clone = session_signal().clone();
-                                        let msg_uids = messages.iter().map(|m| m.uid).collect::<Vec<_>>();
-                                        let ctgry = category.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            let seq = msg_uids.iter().map(|uid| format!("{}", uid)).join(",");
-                                            session_clone.lock().unwrap().mv(seq, "Custodian/Trash").expect("Failed to move message to trash");
-                                        });
+                                        let msg_uids = messages.clone().iter().map(|m| m.uid).collect::<Vec<_>>();
+                                        let _ctgry = category.clone();
+                                        match move_messages_to_trash(session_clone, mailbox_signal(), msg_uids.clone()) {
+                                            Ok(uids) => {
+                                                messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
+                                            }
+                                            Err(e) => {
+                                                println!("Failed to move message: {}", e);
+                                            }
+                                        }
                                     },
                                     "🗑️"
                                 }
                                 div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
-                                    for message in messages.iter() {
-                                        div { class: "bg-gray-200 p-2 rounded-lg min-w-[200px]",
-                                            p { class: "text-gray-600",  "[{message.uid}]" br {} b {"{message.subject}"} }
+                                    for message in messages.clone() {
+                                        div { class: "bg-gray-200 p-2 rounded-lg min-w-[200px] cursor-pointer",
+                                             onclick: move |_| async move {
+                                                selected_uid.set(Some(message.uid));
+                                                if let Some(el) = message_elements().get(&message.uid) {
+                                                     let _ = el.scroll_to(ScrollBehavior::Smooth).await;
+                                                }
+                                            },
+                                            div { class: "text-gray-600",
+                                                if messages_signal().iter().find(|m| m.uid == message.uid).is_some() {
+                                                    div { class: "w-10 h-10 bg-red-50 rounded-full", style: "margin-right: 4px;", "test" }
+                                                }
+                                                "[{message.uid}]"
+                                                br {}
+                                                b {"{message.subject}"}
+                                            }
                                         }
                                     }
                                 }

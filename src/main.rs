@@ -1,6 +1,5 @@
 #![recursion_limit = "256"]
 
-use dioxus::prelude::*;
 
 
 mod utils;
@@ -8,11 +7,24 @@ mod pages;
 mod ai;
 mod db;
 
+use dioxus::prelude::*;
+use dioxus_desktop::{WindowBuilder, LogicalSize};
+
 use utils::AsyncPtrProp;
 use pages::*;
 
+fn make_config() -> dioxus::desktop::Config {
+    dioxus::desktop::Config::default().with_window(make_window())
+}
+
+fn make_window() -> WindowBuilder {
+    WindowBuilder::new()
+        .with_inner_size(LogicalSize::new(1024, 1024))
+}
 fn main() {
-    launch(app);
+    LaunchBuilder::new()
+        .with_cfg(make_config())
+        .launch(app);
 }
 
 #[derive(Clone, PartialEq)]
