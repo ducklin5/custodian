@@ -2257,7 +2257,6 @@ dependencies = [
  "directories",
  "hf-hub",
  "imap",
- "itertools 0.14.0",
  "md5 0.7.0",
  "memmap2",
  "native-tls",

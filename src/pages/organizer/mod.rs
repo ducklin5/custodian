@@ -1,8 +1,10 @@
+mod message_card;
+
 use dioxus::prelude::*;
 
 use burn::backend::wgpu::WgpuDevice;
 
-use itertools::Itertools;
+// use itertools::Itertools; // keep Itertools out to avoid deep generic types
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -14,6 +16,7 @@ use crate::utils::{
     organizer::{MessageInfo, fetch_messages, move_messages_to_trash},
     progress::{UiProgress, UiProgressSignal},
 };
+use message_card::MessageCard;
 
 fn sanitize_label(raw: &str) -> String {
     // Remove anything after an XML-like opener
@@ -172,15 +175,10 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
 
     // Group by sender callback
     let group_by_sender_callback = use_callback(move |_| {
-        let map: HashMap<String, Vec<MessageInfo>> = messages_signal
-            .read()
-            .iter()
-            .into_grouping_map_by(|m| m.sender.clone())
-            .aggregate(|acc, _key, msg| {
-                let mut group = acc.unwrap_or(vec![]);
-                group.push(msg.clone());
-                Some(group)
-            });
+        let mut map: HashMap<String, Vec<MessageInfo>> = HashMap::new();
+        for msg in messages_signal.read().iter() {
+            map.entry(msg.sender.clone()).or_default().push(msg.clone());
+        }
         messages_by_sender.set(map);
         group_by_sender.set(true);
     });
@@ -205,11 +203,13 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                         let mut model_box = model_ptr.lock().unwrap();
                         for msg in messages_clone.read().iter() {
                             let mut groups = messages_by_category_clone.write();
-                            let top_10_categories = groups
-                                .iter()
-                                .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
+                            let mut counts: Vec<(String, usize)> =
+                                groups.iter().map(|(k, v)| (k.clone(), v.len())).collect();
+                            counts.sort_by(|a, b| b.1.cmp(&a.1));
+                            let top_10_categories = counts
+                                .into_iter()
                                 .take(10)
-                                .map(|k| k.0.clone())
+                                .map(|(k, _)| k)
                                 .collect::<Vec<_>>();
 
                             let body_text = match crate::utils::organizer::fetch_message_body(
@@ -235,8 +235,9 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                 .map(|s| sanitize_label(s))
                                 .filter(|s| is_valid_label(s))
                                 .take(3)
-                                .unique()
                                 .collect::<Vec<_>>();
+                            labels.sort();
+                            labels.dedup();
                             if labels.is_empty() {
                                 labels.push("Uncategorized".to_string());
                             }
@@ -259,20 +260,18 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
     let local_msg_count = messages_signal.read().len();
     let sorted_msg_by_sender = {
         let msg_by_sender = messages_by_sender.read();
-        msg_by_sender
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
-            .collect::<Vec<_>>()
+        let mut v: Vec<(String, Vec<MessageInfo>)> =
+            msg_by_sender.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        v.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        v
     };
 
     let sorted_msg_by_category = {
         let msg_by_category = messages_by_category.read();
-        msg_by_category
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .sorted_by(|a, b| b.1.len().cmp(&a.1.len()))
-            .collect::<Vec<_>>()
+        let mut v: Vec<(String, Vec<MessageInfo>)> =
+            msg_by_category.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        v.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        v
     };
 
     let current_model_progress = model_progress.read();
@@ -306,6 +305,17 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
     } else {
         (None, None)
     };
+
+    // Shared callbacks for message card actions
+    let on_select_message = use_callback(move |uid: u32| {
+        selected_uid.set(Some(uid));
+        println!("Selected uid: {}", uid);
+        if let Some(el) = message_elements().get(&uid) {
+            spawn(async move {
+                let _ = el.scroll_to(ScrollBehavior::Smooth).await;
+            });
+        }
+    });
 
     rsx! {
         div { class: "min-h-screen flex flex-col items-center justify-center bg-slate-500 gap-6 p-20",
@@ -346,7 +356,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                         tr { 
                                             id: "row-{message.uid}", 
                                             class: "hover:bg-gray-50 cursor-pointer",
-                                            class: if selected_uid() == Some(message.uid) { "bg-yellow-100" },
+                                            class: if selected_uid() == Some(message.uid) { "bg-yellow-100 hover:bg-yellow-200" },
                                             onclick: move |_| selected_uid.set(Some(message.uid)),
                                             onmounted: move |ctx| {
                                                 message_elements.write().insert(message.uid, ctx.data());
@@ -444,29 +454,15 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                 }
                                 div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
                                     for message in messages.clone() {
-                                        div { 
-                                            class: "bg-gray-200 p-2 rounded-lg w-full cursor-pointer ",
-                                            class: if selected_uid() == Some(message.uid) { "bg-yellow-100" },
-                                            onclick: move |_| async move {
-                                                selected_uid.set(Some(message.uid));
-                                                println!("Selected uid: {}", message.uid);
-                                                if let Some(el) = message_elements().get(&message.uid) {
-                                                    println!("Scrolling to row-{}", message.uid);
-                                                     let _ = el.scroll_to(ScrollBehavior::Smooth).await;
-                                                }
-                                            },
-                                            div { class: "text-gray-600 flex flex-col gap-1",
-                                                div { class: "flex flex-row gap-2 items-center justify-center",
-                                                    "[{message.uid}]"
-                                                    if messages_signal().iter().find(|m| m.uid == message.uid).is_some() {
-                                                        div { class: "w-5 h-5 bg-green-500 rounded-full", style: "margin-right: 4px;" }
-                                                    } else {
-                                                        div { class: "w-5 h-5 bg-red-500 rounded-full", style: "margin-right: 4px;" }
-                                                    }
-                                                }
-                                                b { "{message.subject}" }
-                                                span { "{message.sender}" }
-                                            }
+                                        MessageCard {
+                                            uid: message.uid,
+                                            subject: message.subject.clone(),
+                                            sender: message.sender.clone(),
+                                            exists_in_inbox: messages_signal().iter().find(|m| m.uid == message.uid).is_some(),
+                                            is_selected: selected_uid() == Some(message.uid),
+                                            enable_highlight: true,
+                                            extra_class: "w-full".into(),
+                                            on_select: on_select_message.clone(),
                                         }
                                     }
                                 }
@@ -533,21 +529,15 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                 }
                                 div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
                                     for message in messages.clone() {
-                                        div { class: "bg-gray-200 p-2 rounded-lg min-w-[200px] cursor-pointer",
-                                             onclick: move |_| async move {
-                                                selected_uid.set(Some(message.uid));
-                                                if let Some(el) = message_elements().get(&message.uid) {
-                                                     let _ = el.scroll_to(ScrollBehavior::Smooth).await;
-                                                }
-                                            },
-                                            div { class: "text-gray-600",
-                                                if messages_signal().iter().find(|m| m.uid == message.uid).is_some() {
-                                                    div { class: "w-10 h-10 bg-red-50 rounded-full", style: "margin-right: 4px;", "test" }
-                                                }
-                                                "[{message.uid}]"
-                                                br {}
-                                                b {"{message.subject}"}
-                                            }
+                                        MessageCard {
+                                            uid: message.uid,
+                                            subject: message.subject.clone(),
+                                            sender: message.sender.clone(),
+                                            exists_in_inbox: messages_signal().iter().find(|m| m.uid == message.uid).is_some(),
+                                            is_selected: selected_uid() == Some(message.uid),
+                                            enable_highlight: true,
+                                            extra_class: "min-w-[200px]".into(),
+                                            on_select: on_select_message.clone(),
                                         }
                                     }
                                 }

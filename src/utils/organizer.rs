@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use dioxus::signals::{Signal, SyncStorage};
 
-use itertools::Itertools;
+// use itertools::Itertools; // avoid Iterator adapters that deepen type recursion
 
 use crate::utils::AsyncPtrProp;
 
@@ -23,7 +23,11 @@ pub fn move_messages_to_trash(
     mailbox: String,
     msg_uids: Vec<u32>,
 ) -> Result<Vec<u32>, String> {
-    let seq = msg_uids.iter().map(|uid| format!("{}", uid)).join(",");
+    let seq = msg_uids
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     match session.lock() {
         Err(e) => Err(format!("Failed to lock session: {}", e)),
         Ok(mut session) => {
@@ -161,7 +165,11 @@ pub fn fetch_messages(
         let mut all_message_infos: Vec<MessageInfo> = Vec::new();
 
         for batch in uid_vec.chunks(FETCH_BATCH_SIZE as usize) {
-            let sequence_set = batch.iter().map(|uid| format!("{}", uid)).join(",");
+            let sequence_set = batch
+                .iter()
+                .map(|uid| uid.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             println!("Fetching UID batch: {}...", sequence_set);
 
             let fetch_str = if with_body {
