@@ -36,7 +36,7 @@ pub fn MessageCard(props: MessageCardProps) -> Element {
 
     rsx! {
         div { class: "{classes}",
-            onclick: move |_| async move {
+            onclick: move |_| {
                 on_select.call(uid);
             },
             div { class: "text-gray-600 flex flex-col gap-1",

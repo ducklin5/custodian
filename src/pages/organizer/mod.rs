@@ -311,6 +311,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
         selected_uid.set(Some(uid));
         println!("Selected uid: {}", uid);
         if let Some(el) = message_elements().get(&uid) {
+            let el = el.clone();
             spawn(async move {
                 let _ = el.scroll_to(ScrollBehavior::Smooth).await;
             });
@@ -439,29 +440,34 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                         div { class: "bg-gray-100 p-4 rounded-lg flex flex-col gap-2",
                                 style: "min-width: 600px;",
                                 h2 { class: "text-lg font-bold text-blue-700 mb-2", "{sender} ({messages.len()})" }
-                                button {
-                                    class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-400",
-                                    onclick: move |_| {
-                                        let session_clone = session_signal().clone();
-                                        let msg_uids = messages.clone().iter().map(|m| m.uid).collect::<Vec<_>>();
-                                        if let Ok(uids) = move_messages_to_trash(session_clone, mailbox_signal(), msg_uids.clone()) {
-                                            messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
-                                        } else {
-                                            println!("Failed to move messages");
+                                {
+                                    let messages_for_delete = messages.clone();
+                                    rsx! {
+                                        button {
+                                            class: "w-full py-3 bg-gray-300 text-gray-800 rounded-lg font-bold text-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-400",
+                                            onclick: move |_| {
+                                                let session_clone = session_signal().clone();
+                                                let msg_uids = messages_for_delete.iter().map(|m| m.uid).collect::<Vec<_>>();
+                                                if let Ok(uids) = move_messages_to_trash(session_clone, mailbox_signal(), msg_uids.clone()) {
+                                                    messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
+                                                } else {
+                                                    println!("Failed to move messages");
+                                                }
+                                            },
+                                            "🗑️"
                                         }
-                                    },
-                                    "🗑️"
+                                    }
                                 }
                                 div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
-                                    for message in messages.clone() {
+                                    for message in messages {
                                         MessageCard {
                                             uid: message.uid,
                                             subject: message.subject.clone(),
                                             sender: message.sender.clone(),
-                                            exists_in_inbox: messages_signal().iter().find(|m| m.uid == message.uid).is_some(),
+                                            exists_in_inbox: messages_signal().iter().any(|m| m.uid == message.uid),
                                             is_selected: selected_uid() == Some(message.uid),
                                             enable_highlight: true,
-                                            extra_class: "w-full".into(),
+                                            extra_class: "w-full".to_string(),
                                             on_select: on_select_message.clone(),
                                         }
                                     }
@@ -505,38 +511,44 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                             div { class: "bg-gray-100 p-4 rounded-lg flex flex-col gap-2",
                                 style: "min-width: 600px;",
                                 h2 { class: "text-lg font-bold text-blue-700 mb-2", "{category} ({messages.len()})" }
-                                button {
-                                    class: r#"w-full py-3 rounded-lg font-bold text-lg transition-colors
-                                        duration-200 bg-gray-300 text-gray-800 
-                                        enabled:hover:bg-gray-400
-                                        disabled:bg-gray-200 disabled:text-gray-400 
-                                        disabled:opacity-50 disabled:cursor-not-allowed"#,
-                                    disabled: !smart_complete(),
-                                    onclick: move |_| {
-                                        let session_clone = session_signal().clone();
-                                        let msg_uids = messages.clone().iter().map(|m| m.uid).collect::<Vec<_>>();
-                                        let _ctgry = category.clone();
-                                        match move_messages_to_trash(session_clone, mailbox_signal(), msg_uids.clone()) {
-                                            Ok(uids) => {
-                                                messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
-                                            }
-                                            Err(e) => {
-                                                println!("Failed to move message: {}", e);
-                                            }
+                                {
+                                    let messages_for_delete = messages.clone();
+                                    let category_for_delete = category.clone();
+                                    rsx! {
+                                        button {
+                                            class: r#"w-full py-3 rounded-lg font-bold text-lg transition-colors
+                                                duration-200 bg-gray-300 text-gray-800 
+                                                enabled:hover:bg-gray-400
+                                                disabled:bg-gray-200 disabled:text-gray-400 
+                                                disabled:opacity-50 disabled:cursor-not-allowed"#,
+                                            disabled: !smart_complete(),
+                                            onclick: move |_| {
+                                                let session_clone = session_signal().clone();
+                                                let msg_uids = messages_for_delete.iter().map(|m| m.uid).collect::<Vec<_>>();
+                                                let _ctgry = category_for_delete.clone();
+                                                match move_messages_to_trash(session_clone, mailbox_signal(), msg_uids.clone()) {
+                                                    Ok(uids) => {
+                                                        messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
+                                                    }
+                                                    Err(e) => {
+                                                        println!("Failed to move message: {}", e);
+                                                    }
+                                                }
+                                            },
+                                            "🗑️"
                                         }
-                                    },
-                                    "🗑️"
+                                    }
                                 }
                                 div { class: "max-h-96 overflow-y-auto flex flex-col gap-2",
-                                    for message in messages.clone() {
+                                    for message in messages {
                                         MessageCard {
                                             uid: message.uid,
                                             subject: message.subject.clone(),
                                             sender: message.sender.clone(),
-                                            exists_in_inbox: messages_signal().iter().find(|m| m.uid == message.uid).is_some(),
+                                            exists_in_inbox: messages_signal().iter().any(|m| m.uid == message.uid),
                                             is_selected: selected_uid() == Some(message.uid),
                                             enable_highlight: true,
-                                            extra_class: "min-w-[200px]".into(),
+                                            extra_class: "min-w-[200px]".to_string(),
                                             on_select: on_select_message.clone(),
                                         }
                                     }
