@@ -37,18 +37,12 @@ pub fn move_messages_to_trash(
             let mut success_uids = Vec::new();
             let mut failed_uids = Vec::new();
             session.debug = true;
-            let try_move = |sess: &mut imap::Session<
-                native_tls::TlsStream<std::net::TcpStream>,
-            >|
-             -> Result<(), imap::Error> {
-                sess.uid_mv(&seq, "Custodian/Trash")
-            };
             let mut last_err: Option<String> = None;
             let mut attempt = 0;
             let max_attempts = 2;
             let mut moved_ok = false;
             while attempt < max_attempts {
-                match try_move(&mut *session) {
+                match session.uid_mv(&seq, "Custodian/Trash") {
                     Ok(_) => {
                         moved_ok = true;
                         success_uids.extend(msg_uids.clone());

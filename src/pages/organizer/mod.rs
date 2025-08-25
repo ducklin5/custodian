@@ -338,18 +338,36 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                     }
                 } else {
                     div { class: "mb-6",
+                        style { 
+                            ".shadow-container::before {{
+                                content: '';
+                                position: absolute;
+                                top: 0;
+                                left: 0;
+                                right: 0;
+                                bottom: 0;
+                                inset: 0;
+                                box-shadow: inset 10px -8px 8px -8px rgba(0, 0, 0, 0.5), inset 0px 0 8px 8px rgba(0, 0, 0, 0.5);
+                                pointer-events: none;
+                            }};
+                            .scroll-container {{
+                                scrollbar-width: thin;
+                                scrollbar-color: rgba(0,0,0,0.45) transparent;
+                            }}
+                            "
+                        }
                         p { class: "text-gray-600 mb-4", "Found {local_msg_count} messages" }
-                        div { class: "max-h-96 overflow-y-auto border-spacing-0",
-                            style: "box-shadow: inset 10px -8px 8px -8px rgba(0, 0, 0, 0.5), inset -10px 0 8px 8px rgba(0, 0, 0, 0.5);",
+                        div { class: "relative shadow-container",
+                            div { class: "overflow-y-auto border-spacing-0 h-full max-h-100 scroll-container",
                             table { class: "w-full border-separate border-spacing-0",
                                 thead {
                                     tr { class: "bg-gray-100 sticky top-0 bg-gray-100",
                                         style: "box-shadow: 0 3px 8px 0px rgba(0, 0, 0, 0.5);",
-                                        th { class: "border-3 border-black px-4 py-2 text-left ", "UID" }
-                                        th { class: "border-3 border-black px-4 py-2 text-left ", "Subject" }
-                                        th { class: "border-3 border-black px-4 py-2 text-left ", "Sender" }
-                                        th { class: "border-3 border-black px-4 py-2 text-left ", "Date" }
-                                        th { class: "border-3 border-black px-4 py-2 text-left ", "Actions" }
+                                        th { class: "border-2 border-black-500 px-4 py-2 text-left ", "UID" }
+                                        th { class: "border-2 border-black-500 px-4 py-2 text-left ", "Subject" }
+                                        th { class: "border-2 border-black-500 px-4 py-2 text-left ", "Sender" }
+                                        th { class: "border-2 border-black-500 px-4 py-2 text-left ", "Date" }
+                                        th { class: "border-2 border-black-500 px-4 py-2 text-left ", "Actions" }
                                     }
                                 }
                                 tbody {
@@ -368,13 +386,15 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                             td { class: "border border-gray-300 px-4 py-2", "{message.date}" }
                                             td { class: "border border-gray-300 px-4 py-2",
                                                 button {
-                                                    class: "px-3 py-1 bg-gray-300 text-gray-800 rounded-lg font-bold hover:bg-gray-400 transition-colors duration-200",
+                                                    class: r#"px-3 py-1 bg-gray-300 text-gray-800 rounded-lg
+                                                            font-bold hover:bg-gray-400 transition-colors duration-200"#,
                                                     onclick: move |_| {
                                                         let session_clone = session_signal().clone();
                                                         let uid = message.uid;
                                                         match move_messages_to_trash(session_clone, mailbox_signal(), vec![uid]) {
                                                             Ok(uids) => {
-                                                                messages_signal.set(messages_signal().clone().into_iter().filter(|m| !uids.contains(&m.uid)).collect());
+                                                                messages_signal.set(messages_signal().clone()
+                                                                    .into_iter().filter(|m| !uids.contains(&m.uid)).collect());
                                                             }
                                                             Err(e) => {
                                                                 println!("Failed to move message: {}", e);
@@ -387,6 +407,7 @@ pub fn OrganizerPage(props: OrganizerPageProps) -> Element {
                                         }
                                     }
                                 }
+                            }
                             }
                         }
                     }

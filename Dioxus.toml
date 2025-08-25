@@ -1,12 +1,11 @@
 [application]
 name = "Custodian"
-
 default_platform = "desktop"
 out_dir = "dist"
 asset_dir = "assets"
+icon = "/assets/favicon.ico"
 
 [web.app]
-
 # HTML title tag content
 title = "{{project-name}}"
 
@@ -14,10 +13,33 @@ title = "{{project-name}}"
 reload_html = true
 watch_path = ["src", "assets"]
 
+[platform.windows]
+icon = "/assets/favicon.ico"
+
 # include `assets` in web platform
 [web.resource]
 style = ["/assets/output.css"]
-script = []
 
 [web.resource.dev]
 script = []
+
+[bundle]
+copyright = "Copyright 2025 Alkove"
+icon = [
+	"/assets/32x32.png",
+	"/assets/128x128.png",
+	"/assets/128x128@2x.png",
+	"/assets/favicon.icns",
+	"/assets/favicon.ico",
+]
+identifier = "dev.alkove.custodian"
+publisher = "Alkove"
+
+
+[bundle.windows]
+allow_downgrades = false
+icon_path = "assets/favicon.ico"
+tsp = true
+
+[bundle.windows.webview_install_mode.EmbedBootstrapper]
+silent = true
